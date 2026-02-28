@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+import json
+import tempfile
+from pathlib import Path
+
 from fastapi import APIRouter, File, Form, Request, UploadFile
-from fastapi.responses import HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from starlette.background import BackgroundTask
 
 from app.container import get_container
+from app.media import FfmpegMediaProcessor
 from app.schemas import AnalysisJobAccepted, AnalysisJobResult, AnalysisJobStatus
 
 router = APIRouter()
@@ -239,9 +245,37 @@ def ui_playground() -> str:
       margin-top: 3px;
       font-variant-numeric: tabular-nums;
     }
+    .tl-cut-region {
+      position: absolute;
+      top: 11px;
+      height: 14px;
+      background: rgba(255, 55, 55, 0.45);
+      border-radius: 3px;
+      pointer-events: none;
+      z-index: 1;
+    }
+    #autoCutCard { display: none; }
+    #autoCutCard.visible { display: block; }
+    .autocut-info {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 10px;
+      font-size: 13px;
+      color: var(--muted);
+    }
+    .autocut-info .cut-count {
+      color: #ff5c5c;
+      font-weight: 600;
+    }
+    .autocut-info .saved-time {
+      color: var(--ok);
+      font-weight: 600;
+    }
   </style>
 </head>
 <body>
+  <nav style="margin-bottom:12px"><a href="/" style="color:var(--muted);text-decoration:none">Transcript & Auto-Cut</a> | <a href="/reel-generator" style="color:var(--muted);text-decoration:none">Reel Generator</a></nav>
   <span class="badge">API playground</span>
   <h1>AIEdit Test UI</h1>
   <small class="subtitle">Use this page to test job creation, status polling, and result retrieval.</small>
@@ -294,6 +328,7 @@ def ui_playground() -> str:
       </div>
       <div class="preview-controls">
         <button id="playPauseBtn" type="button">Play</button>
+        <button id="autoCutBtn" class="ghost" type="button" disabled>Auto Cut</button>
         <span id="timeDisplay" class="preview-time">0:00 / 0:00</span>
       </div>
       <div id="tlContainer" class="tl-container">
@@ -307,6 +342,14 @@ def ui_playground() -> str:
       </div>
     </div>
     <pre id="out">{}</pre>
+  </div>
+
+  <div id="autoCutCard" class="card">
+    <h3>Auto-Cut Result</h3>
+    <div id="autoCutInfo" class="autocut-info"></div>
+    <div class="preview-wrap">
+      <video id="autoCutVideo" class="preview-video" controls preload="metadata"></video>
+    </div>
   </div>
 
   <script>
@@ -516,6 +559,94 @@ def ui_playground() -> str:
     });
     // --- End Advanced Playback Timeline ---
 
+    // --- Auto-Cut ---
+    const autoCutBtn = document.getElementById("autoCutBtn");
+    const autoCutCard = document.getElementById("autoCutCard");
+    const autoCutVideo = document.getElementById("autoCutVideo");
+    const autoCutInfo = document.getElementById("autoCutInfo");
+    let detectedCutRegions = [];
+    let autoCutObjectUrl = null;
+
+    function clearCutRegions() {
+      detectedCutRegions = [];
+      autoCutBtn.disabled = true;
+      tlContainer.querySelectorAll(".tl-cut-region").forEach(function (el) { el.remove(); });
+      if (autoCutObjectUrl) { URL.revokeObjectURL(autoCutObjectUrl); autoCutObjectUrl = null; }
+      autoCutVideo.removeAttribute("src");
+      autoCutCard.classList.remove("visible");
+    }
+
+    document.getElementById("media_file").addEventListener("change", clearCutRegions);
+
+    function renderCutRegions(regions) {
+      tlContainer.querySelectorAll(".tl-cut-region").forEach(function (el) { el.remove(); });
+      if (!previewState.duration || !regions.length) return;
+      regions.forEach(function (r) {
+        const left = (r.start_s / previewState.duration) * 100;
+        const width = ((r.end_s - r.start_s) / previewState.duration) * 100;
+        const div = document.createElement("div");
+        div.className = "tl-cut-region";
+        div.style.left = left + "%";
+        div.style.width = width + "%";
+        tlContainer.appendChild(div);
+      });
+    }
+
+    async function runSilenceDetection() {
+      const file = document.getElementById("media_file").files[0];
+      if (!file) return;
+      try {
+        const fd = new FormData();
+        fd.append("media_file", file);
+        fd.append("min_silence_duration", "0.4");
+        fd.append("silence_threshold_db", "-30");
+        const resp = await fetch("/v1/detect-silence", { method: "POST", body: fd });
+        const data = await resp.json();
+        if (resp.ok && data.regions && data.regions.length) {
+          detectedCutRegions = data.regions;
+          renderCutRegions(detectedCutRegions);
+          autoCutBtn.disabled = false;
+        }
+      } catch (err) {
+        // silence detection is best-effort; don't block the UI
+      }
+    }
+
+    autoCutBtn.addEventListener("click", async function () {
+      const file = document.getElementById("media_file").files[0];
+      if (!file || !detectedCutRegions.length) return;
+      autoCutBtn.disabled = true;
+      autoCutBtn.textContent = "Cutting...";
+      try {
+        const fd = new FormData();
+        fd.append("media_file", file);
+        fd.append("cut_regions", JSON.stringify(detectedCutRegions));
+        const resp = await fetch("/v1/auto-cut", { method: "POST", body: fd });
+        if (!resp.ok) {
+          const err = await resp.json();
+          showTranscript("Auto-cut error: " + (err.error || "Unknown error"));
+          return;
+        }
+        const blob = await resp.blob();
+        if (autoCutObjectUrl) URL.revokeObjectURL(autoCutObjectUrl);
+        autoCutObjectUrl = URL.createObjectURL(blob);
+        autoCutVideo.src = autoCutObjectUrl;
+        autoCutVideo.load();
+
+        const totalCut = detectedCutRegions.reduce(function (sum, r) { return sum + (r.end_s - r.start_s); }, 0);
+        autoCutInfo.innerHTML =
+          '<span>Cuts: <span class="cut-count">' + detectedCutRegions.length + " regions</span></span>" +
+          '<span>Time saved: <span class="saved-time">' + fmtTime(totalCut) + "</span></span>";
+        autoCutCard.classList.add("visible");
+      } catch (err) {
+        showTranscript("Auto-cut error: " + (err.message || "Network request failed"));
+      } finally {
+        autoCutBtn.textContent = "Auto Cut";
+        autoCutBtn.disabled = !detectedCutRegions.length;
+      }
+    });
+    // --- End Auto-Cut ---
+
     function showTranscript(value) {
       out.textContent = String(value ?? "").trim() || "{}";
     }
@@ -625,6 +756,7 @@ def ui_playground() -> str:
           jobInput.value = data.job_id;
           const result = await getTranscriptForJob(data);
           showTranscript(result.ok ? result.text : `Error: ${result.error}`);
+          if (result.ok) runSilenceDetection();
         } else {
           const message = extractErrorMessage(data, "Failed to submit job");
           showTranscript(`Error: ${message}`);
@@ -693,3 +825,77 @@ def get_analysis_job_status(request: Request, job_id: str) -> AnalysisJobStatus:
 def get_analysis_job_result(request: Request, job_id: str) -> AnalysisJobResult:
     service = _service_from_request(request)
     return service.get_result(job_id)
+
+
+_media_proc = FfmpegMediaProcessor()
+
+
+@router.post("/v1/detect-silence")
+async def detect_silence(
+    media_file: UploadFile = File(...),
+    silence_threshold_db: float = Form(default=-30),
+    min_silence_duration: float = Form(default=0.4),
+) -> JSONResponse:
+    suffix = Path(media_file.filename or "upload").suffix or ".mp4"
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+    try:
+        tmp.write(await media_file.read())
+        tmp.close()
+        regions = _media_proc.detect_silence(
+            Path(tmp.name),
+            threshold_db=silence_threshold_db,
+            min_duration=min_silence_duration,
+        )
+        return JSONResponse({"regions": regions})
+    except RuntimeError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    finally:
+        Path(tmp.name).unlink(missing_ok=True)
+
+
+@router.post("/v1/auto-cut")
+async def auto_cut(
+    media_file: UploadFile = File(...),
+    cut_regions: str = Form(...),
+) -> FileResponse:
+    suffix = Path(media_file.filename or "upload").suffix or ".mp4"
+    input_tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+    output_tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+    output_tmp.close()
+    try:
+        input_tmp.write(await media_file.read())
+        input_tmp.close()
+
+        regions = json.loads(cut_regions)
+        duration = _media_proc._probe_duration(Path(input_tmp.name))
+
+        cuts = sorted(regions, key=lambda r: r["start_s"])
+        keep_ranges: list[tuple[float, float]] = []
+        cursor = 0.0
+        for cut in cuts:
+            start, end = cut["start_s"], cut["end_s"]
+            if start > cursor:
+                keep_ranges.append((cursor, start))
+            cursor = max(cursor, end)
+        if cursor < duration:
+            keep_ranges.append((cursor, duration))
+
+        if not keep_ranges:
+            return JSONResponse({"error": "Nothing left after cuts"}, status_code=400)
+
+        _media_proc.trim_keep_ranges(
+            Path(input_tmp.name), Path(output_tmp.name), keep_ranges
+        )
+
+        cleanup = BackgroundTask(lambda: Path(output_tmp.name).unlink(missing_ok=True))
+        return FileResponse(
+            output_tmp.name,
+            media_type="video/mp4",
+            filename="autocut.mp4",
+            background=cleanup,
+        )
+    except (RuntimeError, json.JSONDecodeError, KeyError) as exc:
+        Path(output_tmp.name).unlink(missing_ok=True)
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    finally:
+        Path(input_tmp.name).unlink(missing_ok=True)
