@@ -206,6 +206,56 @@ def ui_playground() -> str:
       return fallback;
     }
 
+    async function fetchTranscript(jobId) {
+      const response = await fetch(`/v1/analysis-jobs/${encodeURIComponent(jobId)}/result`);
+      const payload = await readJsonOrText(response);
+      if (!response.ok) {
+        return { ok: false, text: "", error: extractErrorMessage(payload, "Failed to fetch result") };
+      }
+      if (typeof payload === "string") {
+        const text = payload.trim();
+        return text
+          ? { ok: true, text, error: "" }
+          : { ok: false, text: "", error: "No transcript returned" };
+      }
+      const text = extractTranscript(payload);
+      return text
+        ? { ok: true, text, error: "" }
+        : { ok: false, text: "", error: "No transcript returned" };
+    }
+
+    async function waitForTranscript(jobId) {
+      for (let attempt = 0; attempt < 30; attempt += 1) {
+        const statusResponse = await fetch(`/v1/analysis-jobs/${encodeURIComponent(jobId)}`);
+        if (statusResponse.ok) {
+          const statusPayload = await statusResponse.json();
+          if (statusPayload.status === "succeeded") {
+            return await fetchTranscript(jobId);
+          }
+          if (statusPayload.status === "failed") {
+            const errorMessage = extractErrorMessage(
+              statusPayload,
+              "Job failed before transcript was produced"
+            );
+            return { ok: false, text: "", error: errorMessage };
+          }
+        }
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      }
+      return { ok: false, text: "", error: "Timed out waiting for transcript" };
+    }
+
+    async function getTranscriptForJob(data) {
+      if (data.status === "succeeded") {
+        return await fetchTranscript(data.job_id);
+      }
+      if (data.status === "failed") {
+        const msg = data.error_message || "Job failed before transcript was produced";
+        return { ok: false, text: "", error: msg };
+      }
+      return await waitForTranscript(data.job_id);
+    }
+
     document.getElementById("createForm").addEventListener("submit", async (event) => {
       event.preventDefault();
       const media = document.getElementById("media_file").files[0];
@@ -226,9 +276,11 @@ def ui_playground() -> str:
       const data = await readJsonOrText(response);
       if (response.ok && data && data.job_id) {
         jobInput.value = data.job_id;
-        showTranscript(data);
+        const result = await getTranscriptForJob(data);
+        showTranscript(result.ok ? result.text : `Error: ${result.error}`);
       } else {
-        showTranscript(data);
+        const message = extractErrorMessage(data, "Failed to submit job");
+        showTranscript(`Error: ${message}`);
       }
     });
 
@@ -236,16 +288,16 @@ def ui_playground() -> str:
       const jobId = jobInput.value.trim();
       if (!jobId) return showTranscript("Enter a job id first.");
       showTranscript("Checking status...");
-      const response = await fetch(`/v1/analysis-jobs/${encodeURIComponent(jobId)}`);
-      showTranscript(await readJsonOrText(response));
+      const result = await waitForTranscript(jobId);
+      showTranscript(result.ok ? result.text : `Error: ${result.error}`);
     });
 
     document.getElementById("resultBtn").addEventListener("click", async () => {
       const jobId = jobInput.value.trim();
       if (!jobId) return showTranscript("Enter a job id first.");
       showTranscript("Loading result...");
-      const response = await fetch(`/v1/analysis-jobs/${encodeURIComponent(jobId)}/result`);
-      showTranscript(await readJsonOrText(response));
+      const result = await fetchTranscript(jobId);
+      showTranscript(result.ok ? result.text : `Error: ${result.error}`);
     });
   </script>
 </body>
