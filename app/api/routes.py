@@ -399,7 +399,12 @@ def ui_playground() -> str:
     const THUMB_MAX = 120;
 
     function sizeCanvasToVideo() {
-      const cw = 160, ch = 90;
+      const vw = previewVideo.videoWidth || 16;
+      const vh = previewVideo.videoHeight || 9;
+      const ratio = vw / vh;
+      let cw, ch;
+      if (ratio >= 1) { cw = THUMB_MAX; ch = Math.round(THUMB_MAX / ratio); }
+      else { ch = THUMB_MAX; cw = Math.round(THUMB_MAX * ratio); }
       tlCanvas.width = cw;
       tlCanvas.height = ch;
       tlCanvas.style.width = cw + "px";
