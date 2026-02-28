@@ -67,7 +67,14 @@ class AnalysisJobService:
 
         temp_path = self._persist_upload_to_temp(upload_file)
         try:
-            media_info = self._media_processor.inspect(temp_path, content_type)
+            try:
+                media_info = self._media_processor.inspect(temp_path, content_type)
+            except RuntimeError as exc:
+                raise ServiceError(
+                    code=ErrorCode.TRANSCRIPTION_FAILED,
+                    message=f"Media inspection failed: {exc}",
+                    status_code=400,
+                ) from exc
             if media_info.duration_seconds > self._settings.media_max_duration_seconds:
                 raise ServiceError(
                     code=ErrorCode.DURATION_LIMIT_EXCEEDED,
