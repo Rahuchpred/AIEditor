@@ -2,10 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
-
-from app.constants import DEFAULT_TIPS_COUNT
-
+from pydantic import BaseModel, ConfigDict
 
 class TimedTextSegment(BaseModel):
     start_ms: int | None = None
@@ -59,10 +56,7 @@ class AnalysisJobStatus(BaseModel):
 class AnalysisJobResult(BaseModel):
     job_id: str
     input: ResultInputMetadata
-    transcript_raw: TranscriptPayload | None = None
-    captions_corrected_en: CorrectedCaptions
-    rewrite_primary_en: str
-    speaking_tips_en: list[str] = Field(min_length=DEFAULT_TIPS_COUNT, max_length=DEFAULT_TIPS_COUNT)
+    transcript: TranscriptPayload
     processing_metrics: ProcessingMetrics
 
 

@@ -7,19 +7,13 @@ from pathlib import Path
 from uuid import uuid4
 
 from app.constants import (
-    DEFAULT_TIPS_COUNT,
     ErrorCode,
     JobStatus,
-    PRESET_STYLES,
-    StyleMode,
     SUPPORTED_MEDIA_TYPES,
 )
 from app.errors import ServiceError
 from app.models import AnalysisJob, utc_now
 from app.providers import (
-    LLMProvider,
-    LLMProviderError,
-    LLMTimeoutError,
     TranscriptionProvider,
     TranscriptionProviderError,
 )
@@ -27,7 +21,6 @@ from app.schemas import (
     AnalysisJobAccepted,
     AnalysisJobResult,
     AnalysisJobStatus,
-    CorrectedCaptions,
     ProcessingMetrics,
     ResultInputMetadata,
     TimedTextSegment,
@@ -44,7 +37,6 @@ class AnalysisJobService:
         storage,
         media_processor,
         transcription_provider: TranscriptionProvider,
-        llm_provider: LLMProvider,
         task_dispatcher,
     ):
         self._session_factory = session_factory
@@ -52,19 +44,19 @@ class AnalysisJobService:
         self._storage = storage
         self._media_processor = media_processor
         self._transcription_provider = transcription_provider
-        self._llm_provider = llm_provider
         self._task_dispatcher = task_dispatcher
 
     def create_job(
         self,
         upload_file,
-        style_mode: str,
-        style_value: str,
+        style_mode: str = "preset",
+        style_value: str = "clear",
         input_language_hint: str | None = None,
         include_raw_transcript: bool = True,
         include_timestamps: bool = True,
     ) -> AnalysisJobAccepted:
-        normalized_style_mode = self._validate_style(style_mode, style_value)
+        normalized_style_mode = "preset"
+        normalized_style_value = "clear"
         content_type = upload_file.content_type or ""
         if content_type not in SUPPORTED_MEDIA_TYPES:
             raise ServiceError(
@@ -96,7 +88,7 @@ class AnalysisJobService:
                         media_type=media_info.media_type,
                         input_storage_key=input_storage_key,
                         style_mode=normalized_style_mode,
-                        style_value=style_value.strip(),
+                        style_value=normalized_style_value,
                         input_language_hint=input_language_hint,
                         duration_seconds=media_info.duration_seconds,
                         include_raw_transcript=include_raw_transcript,
@@ -180,26 +172,13 @@ class AnalysisJobService:
                 job.updated_at = utc_now()
                 session.commit()
 
-                llm_started = time.perf_counter()
-                corrected_captions = self._llm_provider.clean_captions(
-                    transcription=transcription,
-                    include_timestamps=job.include_timestamps,
-                )
-                rewrite_primary = self._llm_provider.rewrite_primary(
-                    corrected_captions.full_text,
-                    job.style_value,
-                )
-                speaking_tips = self._llm_provider.speaking_tips(
-                    corrected_captions.full_text,
-                    job.style_value,
-                )
-                llm_ms = int((time.perf_counter() - llm_started) * 1000)
-
-                if len(speaking_tips) != DEFAULT_TIPS_COUNT:
-                    raise LLMProviderError("LLM provider returned an invalid number of tips")
-
                 total_ms = int((time.perf_counter() - started_at) * 1000)
-                result = self._build_result(job, transcription, corrected_captions, rewrite_primary, speaking_tips, transcription_ms, llm_ms, total_ms)
+                result = self._build_result(
+                    job,
+                    transcription,
+                    transcription_ms,
+                    total_ms,
+                )
                 result_storage_key = f"jobs/{job.id}/result.json"
                 self._storage.put_bytes(
                     result_storage_key,
@@ -214,10 +193,6 @@ class AnalysisJobService:
                 session.commit()
             except TranscriptionProviderError as exc:
                 self._mark_failed(session, job, ErrorCode.TRANSCRIPTION_FAILED, str(exc))
-            except LLMTimeoutError as exc:
-                self._mark_failed(session, job, ErrorCode.LLM_TIMEOUT, str(exc))
-            except LLMProviderError as exc:
-                self._mark_failed(session, job, ErrorCode.LLM_PROVIDER_ERROR, str(exc))
             finally:
                 input_path.unlink(missing_ok=True)
                 normalized_audio_path.unlink(missing_ok=True)
@@ -226,19 +201,13 @@ class AnalysisJobService:
         self,
         job: AnalysisJob,
         transcription: TranscriptionResult,
-        corrected_captions: CorrectedCaptions,
-        rewrite_primary: str,
-        speaking_tips: list[str],
         transcription_ms: int,
-        llm_ms: int,
         total_ms: int,
     ) -> AnalysisJobResult:
-        transcript_payload = None
-        if job.include_raw_transcript:
-            transcript_payload = TranscriptPayload(
-                language_detected=transcription.language_detected,
-                segments=self._apply_timestamp_preference(transcription.segments, job.include_timestamps),
-            )
+        transcript_payload = TranscriptPayload(
+            language_detected=transcription.language_detected,
+            segments=self._apply_timestamp_preference(transcription.segments, job.include_timestamps),
+        )
 
         return AnalysisJobResult(
             job_id=job.id,
@@ -248,18 +217,12 @@ class AnalysisJobService:
                 style_mode=job.style_mode,
                 style_value=job.style_value,
             ),
-            transcript_raw=transcript_payload,
-            captions_corrected_en=CorrectedCaptions(
-                segments=self._apply_timestamp_preference(corrected_captions.segments, job.include_timestamps),
-                full_text=corrected_captions.full_text,
-            ),
-            rewrite_primary_en=rewrite_primary,
-            speaking_tips_en=speaking_tips,
+            transcript=transcript_payload,
             processing_metrics=ProcessingMetrics(
                 transcription_provider="elevenlabs",
-                llm_provider="mistral",
+                llm_provider="none",
                 transcription_ms=transcription_ms,
-                llm_ms=llm_ms,
+                llm_ms=0,
                 total_ms=total_ms,
             ),
         )
@@ -290,38 +253,6 @@ class AnalysisJobService:
         job.error_message = message[:255]
         job.updated_at = utc_now()
         session.commit()
-
-    def _validate_style(self, style_mode: str, style_value: str) -> str:
-        if style_mode not in {StyleMode.PRESET, StyleMode.CUSTOM}:
-            raise ServiceError(
-                code=ErrorCode.INVALID_STYLE_VALUE,
-                message="style_mode must be 'preset' or 'custom'",
-                status_code=400,
-            )
-
-        stripped_value = style_value.strip()
-        if not stripped_value:
-            raise ServiceError(
-                code=ErrorCode.INVALID_STYLE_VALUE,
-                message="style_value is required",
-                status_code=400,
-            )
-
-        if style_mode == StyleMode.PRESET and stripped_value not in PRESET_STYLES:
-            raise ServiceError(
-                code=ErrorCode.INVALID_STYLE_VALUE,
-                message="Invalid preset style",
-                status_code=400,
-            )
-
-        if style_mode == StyleMode.CUSTOM and len(stripped_value) > 80:
-            raise ServiceError(
-                code=ErrorCode.INVALID_STYLE_VALUE,
-                message="Custom style values must be 80 characters or fewer",
-                status_code=400,
-            )
-
-        return str(style_mode)
 
     def _persist_upload_to_temp(self, upload_file) -> Path:
         original_suffix = Path(upload_file.filename or "").suffix or self._default_suffix(upload_file.content_type or "")

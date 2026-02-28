@@ -1,6 +1,6 @@
 # AIEdit Feature 4 MVP
 
-Backend API for asynchronous media transcription, English caption cleanup, and persona-based rewrites.
+Backend API for asynchronous media transcription from uploaded audio/video.
 
 ## Stack
 - FastAPI for HTTP endpoints
@@ -8,7 +8,6 @@ Backend API for asynchronous media transcription, English caption cleanup, and p
 - PostgreSQL for job metadata
 - S3-compatible object storage for media and result payloads
 - ElevenLabs for transcription
-- Mistral for caption cleanup, rewrite generation, and speaking tips
 
 ## API
 - `POST /v1/analysis-jobs`
@@ -19,7 +18,12 @@ Backend API for asynchronous media transcription, English caption cleanup, and p
 ## Local Development
 1. Install dependencies: `python3 -m pip install -e '.[dev]'`
 2. Copy `.env.example` to `.env` and set real provider credentials.
-   The app accepts docs-style `MISTRAL_API_KEY` and `ELEVENLABS_API_KEY` variables directly.
+   The app accepts both docs-style keys and `AIEDIT_` aliases:
+   - ElevenLabs (required): `ELEVENLABS_API_KEY` or `AIEDIT_ELEVENLABS_API_KEY`
+   - Mistral (optional / not used in transcript-only mode): `MISTRAL_API_KEY` or `AIEDIT_MISTRAL_API_KEY`
+   Optional overrides:
+   - `AIEDIT_ELEVENLABS_API_URL`, `ELEVENLABS_MODEL_ID`/`AIEDIT_ELEVENLABS_MODEL_ID`
+   - `AIEDIT_MISTRAL_API_URL`, `MISTRAL_MODEL`/`AIEDIT_MISTRAL_MODEL`
 3. Run the API: `uvicorn app.main:app --reload`
 
 The default local setup uses:

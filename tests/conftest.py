@@ -13,9 +13,9 @@ from app.container import AppContainer
 from app.db import build_engine, build_session_factory, init_database
 from app.errors import ServiceError
 from app.main import create_app
-from app.providers import LLMProviderError, LLMTimeoutError, TranscriptionProviderError
+from app.providers import TranscriptionProviderError
 from app.queueing import NoOpTaskDispatcher
-from app.schemas import CorrectedCaptions, MediaInfo, TimedTextSegment, TranscriptionResult
+from app.schemas import MediaInfo, TimedTextSegment, TranscriptionResult
 from app.storage import LocalObjectStorageClient
 
 
@@ -69,51 +69,12 @@ class FakeTranscriptionProvider:
         )
 
 
-class FakeLLMProvider:
-    def __init__(self, failure: Exception | None = None):
-        self.failure = failure
-
-    def clean_captions(self, transcription: TranscriptionResult, include_timestamps: bool) -> CorrectedCaptions:
-        if self.failure:
-            raise self.failure
-
-        cleaned_text = (
-            "Translated English caption."
-            if transcription.language_detected and transcription.language_detected != "en"
-            else "Clean English caption."
-        )
-        segments = [
-            TimedTextSegment(
-                start_ms=segment.start_ms if include_timestamps else None,
-                end_ms=segment.end_ms if include_timestamps else None,
-                text=cleaned_text,
-            )
-            for segment in transcription.segments
-        ]
-        return CorrectedCaptions(segments=segments, full_text=" ".join(segment.text for segment in segments))
-
-    def rewrite_primary(self, corrected_text: str, style_value: str) -> str:
-        if self.failure:
-            raise self.failure
-        return f"{style_value}: {corrected_text}"
-
-    def speaking_tips(self, corrected_text: str, style_value: str) -> list[str]:
-        if self.failure:
-            raise self.failure
-        return [
-            "Use shorter sentences.",
-            "Replace vague words with concrete ones.",
-            "Open with the main point.",
-        ]
-
-
 @dataclass
 class TestContext:
     client: TestClient
     container: AppContainer
     media_processor: FakeMediaProcessor
     transcription_provider: FakeTranscriptionProvider
-    llm_provider: FakeLLMProvider
 
     @property
     def service(self):
@@ -145,7 +106,6 @@ def context_factory(tmp_path):
         language_detected: str = "en",
         transcript_text: str = "Hello from the transcript.",
         transcription_failure: Exception | None = None,
-        llm_failure: Exception | None = None,
         media_max_bytes: int | None = None,
         media_max_duration_seconds: int = 900,
     ) -> TestContext:
@@ -153,7 +113,8 @@ def context_factory(tmp_path):
             database_url=f"sqlite+pysqlite:///{tmp_path / f'test-{len(created_contexts)}.db'}",
             task_execution_mode="queue",
             storage_backend="local",
-            local_storage_path=str(tmp_path / f"storage-{len(created_contexts)}"),
+            local_storage_path=str(
+                tmp_path / f"storage-{len(created_contexts)}"),
             media_max_bytes=media_max_bytes or 200 * 1024 * 1024,
             media_max_duration_seconds=media_max_duration_seconds,
         )
@@ -167,7 +128,6 @@ def context_factory(tmp_path):
             text=transcript_text,
             failure=transcription_failure,
         )
-        llm_provider = FakeLLMProvider(failure=llm_failure)
 
         container = AppContainer(
             settings=settings,
@@ -175,7 +135,7 @@ def context_factory(tmp_path):
             storage=LocalObjectStorageClient(settings.local_storage_path),
             media_processor=media_processor,
             transcription_provider=transcription_provider,
-            llm_provider=llm_provider,
+            llm_provider=None,
             task_dispatcher=NoOpTaskDispatcher(),
         )
         client = TestClient(create_app(container))
@@ -184,7 +144,6 @@ def context_factory(tmp_path):
             container=container,
             media_processor=media_processor,
             transcription_provider=transcription_provider,
-            llm_provider=llm_provider,
         )
         created_contexts.append(context)
         return context

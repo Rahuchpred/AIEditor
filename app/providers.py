@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from typing import Any, Protocol
 
 import httpx
@@ -40,6 +41,8 @@ class LLMProvider(Protocol):
 
 
 class HttpElevenLabsTranscriptionProvider:
+    _MAX_ATTEMPTS = 3
+
     def __init__(self, settings: Settings):
         self._settings = settings
         self._client = httpx.Client(timeout=settings.provider_timeout_seconds)
@@ -54,7 +57,7 @@ class HttpElevenLabsTranscriptionProvider:
 
         try:
             with open(audio_path, "rb") as audio_handle:
-                response = self._client.post(
+                response = self._post_with_retries(
                     self._settings.elevenlabs_api_url,
                     headers={"xi-api-key": self._settings.elevenlabs_api_key},
                     data=payload,
@@ -66,7 +69,10 @@ class HttpElevenLabsTranscriptionProvider:
             raise TranscriptionProviderError("ElevenLabs transcription request failed") from exc
 
         if response.status_code >= 400:
-            raise TranscriptionProviderError("ElevenLabs transcription returned an error")
+            detail = _safe_http_error_detail(response)
+            raise TranscriptionProviderError(
+                f"ElevenLabs transcription returned HTTP {response.status_code}: {detail}"
+            )
 
         try:
             body = response.json()
@@ -83,23 +89,57 @@ class HttpElevenLabsTranscriptionProvider:
     def _extract_segments(self, body: dict[str, Any]) -> list[TimedTextSegment]:
         raw_segments = body.get("segments") or []
         if raw_segments:
-            return [
-                TimedTextSegment(
-                    start_ms=_to_millis(segment.get("start_ms", segment.get("start"))),
-                    end_ms=_to_millis(segment.get("end_ms", segment.get("end"))),
-                    text=str(segment.get("text", "")).strip(),
+            parsed_segments: list[TimedTextSegment] = []
+            for segment in raw_segments:
+                text = str(segment.get("text", "")).strip()
+                if not text:
+                    continue
+                parsed_segments.append(
+                    TimedTextSegment(
+                        start_ms=_to_millis(segment.get("start_ms", segment.get("start"))),
+                        end_ms=_to_millis(segment.get("end_ms", segment.get("end"))),
+                        text=text,
+                    )
                 )
-                for segment in raw_segments
-                if str(segment.get("text", "")).strip()
-            ]
+            if parsed_segments:
+                return parsed_segments
+
+        words = body.get("words") or []
+        if isinstance(words, list) and words:
+            word_segments: list[TimedTextSegment] = []
+            for token in words:
+                token_text = str(token.get("text") or token.get("word") or "").strip()
+                if not token_text:
+                    continue
+                word_segments.append(
+                    TimedTextSegment(
+                        start_ms=_to_millis(token.get("start_ms", token.get("start"))),
+                        end_ms=_to_millis(token.get("end_ms", token.get("end"))),
+                        text=token_text,
+                    )
+                )
+            if word_segments:
+                return _merge_word_segments(word_segments)
 
         text = str(body.get("text", "")).strip()
         if not text:
             return []
         return [TimedTextSegment(start_ms=0, end_ms=None, text=text)]
 
+    def _post_with_retries(self, url: str, **kwargs: Any) -> httpx.Response:
+        response: httpx.Response | None = None
+        for attempt in range(1, self._MAX_ATTEMPTS + 1):
+            response = self._client.post(url, **kwargs)
+            if not _is_transient_status(response.status_code) or attempt == self._MAX_ATTEMPTS:
+                break
+            time.sleep(_retry_backoff_seconds(attempt))
+        assert response is not None
+        return response
+
 
 class MistralLLMProvider:
+    _MAX_ATTEMPTS = 3
+
     def __init__(self, settings: Settings):
         self._settings = settings
         self._client = httpx.Client(timeout=settings.provider_timeout_seconds)
@@ -165,7 +205,7 @@ class MistralLLMProvider:
             raise LLMProviderError("Missing Mistral API key")
 
         try:
-            response = self._client.post(
+            response = self._post_with_retries(
                 self._settings.mistral_api_url,
                 headers={"Authorization": f"Bearer {self._settings.mistral_api_key}"},
                 json={
@@ -188,7 +228,8 @@ class MistralLLMProvider:
             raise LLMProviderError("Mistral request failed") from exc
 
         if response.status_code >= 400:
-            raise LLMProviderError("Mistral returned an error")
+            detail = _safe_http_error_detail(response)
+            raise LLMProviderError(f"Mistral returned HTTP {response.status_code}: {detail}")
 
         try:
             body = response.json()
@@ -201,7 +242,7 @@ class MistralLLMProvider:
         message = choices[0].get("message", {})
         content = message.get("content", "")
         if isinstance(content, list):
-            return "".join(str(item.get("text", "")) for item in content)
+            return "".join(str(item.get("text", "")).strip() for item in content)
         return str(content)
 
     def _parse_json(self, raw_content: str, context: str) -> Any:
@@ -210,6 +251,16 @@ class MistralLLMProvider:
             return json.loads(stripped)
         except ValueError as exc:
             raise LLMProviderError(f"Mistral {context} response was not valid JSON") from exc
+
+    def _post_with_retries(self, url: str, **kwargs: Any) -> httpx.Response:
+        response: httpx.Response | None = None
+        for attempt in range(1, self._MAX_ATTEMPTS + 1):
+            response = self._client.post(url, **kwargs)
+            if not _is_transient_status(response.status_code) or attempt == self._MAX_ATTEMPTS:
+                break
+            time.sleep(_retry_backoff_seconds(attempt))
+        assert response is not None
+        return response
 
 
 def _strip_code_fences(payload: str) -> str:
@@ -244,3 +295,63 @@ def _coerce_optional_int(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _merge_word_segments(word_segments: list[TimedTextSegment]) -> list[TimedTextSegment]:
+    merged: list[TimedTextSegment] = []
+    buffer_words: list[str] = []
+    buffer_start: int | None = None
+    buffer_end: int | None = None
+
+    for segment in word_segments:
+        buffer_words.append(segment.text)
+        if buffer_start is None:
+            buffer_start = segment.start_ms
+        if segment.end_ms is not None:
+            buffer_end = segment.end_ms
+
+        boundary = segment.text.endswith((".", "?", "!")) or len(buffer_words) >= 10
+        if not boundary:
+            continue
+
+        merged.append(
+            TimedTextSegment(
+                start_ms=buffer_start,
+                end_ms=buffer_end,
+                text=" ".join(buffer_words).replace(" ,", ",").replace(" .", ".").strip(),
+            )
+        )
+        buffer_words = []
+        buffer_start = None
+        buffer_end = None
+
+    if buffer_words:
+        merged.append(
+            TimedTextSegment(
+                start_ms=buffer_start,
+                end_ms=buffer_end,
+                text=" ".join(buffer_words).replace(" ,", ",").replace(" .", ".").strip(),
+            )
+        )
+    return merged
+
+
+def _is_transient_status(status_code: int) -> bool:
+    return status_code == 429 or 500 <= status_code <= 599
+
+
+def _retry_backoff_seconds(attempt: int) -> float:
+    return min(0.8, 0.15 * (2 ** (attempt - 1)))
+
+
+def _safe_http_error_detail(response: httpx.Response) -> str:
+    try:
+        payload = response.json()
+        if isinstance(payload, dict):
+            detail = payload.get("error") or payload.get("message") or payload.get("detail")
+            if detail:
+                return str(detail)[:200]
+    except ValueError:
+        pass
+    text = response.text.strip()
+    return (text or "upstream error")[:200]

@@ -19,7 +19,7 @@ class AppContainer:
     storage: ObjectStorageClient
     media_processor: object
     transcription_provider: object
-    llm_provider: object
+    llm_provider: object | None
     task_dispatcher: TaskDispatcher
 
     def create_analysis_service(self) -> AnalysisJobService:
@@ -29,7 +29,6 @@ class AppContainer:
             storage=self.storage,
             media_processor=self.media_processor,
             transcription_provider=self.transcription_provider,
-            llm_provider=self.llm_provider,
             task_dispatcher=self.task_dispatcher,
         )
 
