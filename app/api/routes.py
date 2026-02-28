@@ -114,6 +114,51 @@ def ui_playground() -> str:
       overflow: auto;
       min-height: 190px;
     }
+    #previewPanel { display: none; margin-bottom: 14px; }
+    #previewPanel.visible { display: block; }
+    .preview-wrap {
+      position: relative;
+      width: 100%;
+      aspect-ratio: 16 / 9;
+      background: #060d1a;
+      border-radius: 8px;
+      overflow: hidden;
+      border: 1px solid #22345d;
+    }
+    .preview-video {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      display: block;
+    }
+    .preview-placeholder {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #5a6f96;
+      font-size: 14px;
+      pointer-events: none;
+    }
+    .preview-controls {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-top: 10px;
+    }
+    .preview-controls button {
+      min-width: 70px;
+      padding: 6px 10px;
+      font-size: 13px;
+    }
+    .preview-time {
+      font-size: 12px;
+      color: var(--muted);
+      white-space: nowrap;
+      margin-left: auto;
+      font-variant-numeric: tabular-nums;
+    }
   </style>
 </head>
 <body>
@@ -162,12 +207,92 @@ def ui_playground() -> str:
 
   <div class="card">
     <h3>Response</h3>
+    <div id="previewPanel">
+      <div class="preview-wrap">
+        <video id="previewVideo" class="preview-video" preload="metadata"></video>
+        <div id="previewPlaceholder" class="preview-placeholder">No video loaded</div>
+      </div>
+      <div class="preview-controls">
+        <button id="playPauseBtn" type="button">Play</button>
+        <span id="timeDisplay" class="preview-time">0:00 / 0:00</span>
+      </div>
+    </div>
     <pre id="out">{}</pre>
   </div>
 
   <script>
     const out = document.getElementById("out");
     const jobInput = document.getElementById("job_id");
+
+    // --- Video Preview Panel ---
+    const previewPanel = document.getElementById("previewPanel");
+    const previewVideo = document.getElementById("previewVideo");
+    const previewPlaceholder = document.getElementById("previewPlaceholder");
+    const playPauseBtn = document.getElementById("playPauseBtn");
+    const timeDisplay = document.getElementById("timeDisplay");
+    const previewState = { isPlaying: false, currentTime: 0, duration: 0 };
+    let previewObjectUrl = null;
+
+    function fmtTime(sec) {
+      const s = Math.max(0, Math.floor(sec));
+      const m = Math.floor(s / 60);
+      return m + ":" + String(s % 60).padStart(2, "0");
+    }
+
+    function updateTimeDisplay() {
+      timeDisplay.textContent = fmtTime(previewState.currentTime) + " / " + fmtTime(previewState.duration);
+    }
+
+    document.getElementById("media_file").addEventListener("change", function () {
+      const file = this.files[0];
+      if (previewObjectUrl) { URL.revokeObjectURL(previewObjectUrl); previewObjectUrl = null; }
+      previewState.isPlaying = false;
+      previewState.currentTime = 0;
+      previewState.duration = 0;
+      playPauseBtn.textContent = "Play";
+      updateTimeDisplay();
+
+      if (file && file.type.startsWith("video/")) {
+        previewObjectUrl = URL.createObjectURL(file);
+        previewVideo.src = previewObjectUrl;
+        previewVideo.load();
+        previewPlaceholder.style.display = "none";
+        previewPanel.classList.add("visible");
+      } else {
+        previewVideo.removeAttribute("src");
+        previewPlaceholder.style.display = "";
+        previewPanel.classList.remove("visible");
+      }
+    });
+
+    previewVideo.addEventListener("loadedmetadata", function () {
+      previewState.duration = previewVideo.duration || 0;
+      updateTimeDisplay();
+    });
+
+    previewVideo.addEventListener("timeupdate", function () {
+      previewState.currentTime = previewVideo.currentTime;
+      updateTimeDisplay();
+    });
+
+    previewVideo.addEventListener("ended", function () {
+      previewState.isPlaying = false;
+      playPauseBtn.textContent = "Play";
+    });
+
+    playPauseBtn.addEventListener("click", function () {
+      if (!previewVideo.src || !previewState.duration) return;
+      if (previewState.isPlaying) {
+        previewVideo.pause();
+        previewState.isPlaying = false;
+        playPauseBtn.textContent = "Play";
+      } else {
+        previewVideo.play();
+        previewState.isPlaying = true;
+        playPauseBtn.textContent = "Pause";
+      }
+    });
+    // --- End Video Preview Panel ---
 
     function showTranscript(value) {
       out.textContent = String(value ?? "").trim() || "{}";
