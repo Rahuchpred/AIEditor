@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 import wave
@@ -80,6 +81,14 @@ class FfmpegMediaProcessor:
                 except ValueError:
                     pass
 
+        ffmpeg = _resolve_ffmpeg_binary()
+        if ffmpeg is not None:
+            command = [ffmpeg, "-i", str(file_path), "-f", "null", "-"]
+            completed = subprocess.run(command, capture_output=True, text=True, check=False)
+            duration = _parse_ffmpeg_duration(completed.stderr)
+            if duration is not None:
+                return duration
+
         if file_path.suffix.lower() == ".wav":
             with wave.open(str(file_path), "rb") as wav_file:
                 frame_rate = wav_file.getframerate()
@@ -89,6 +98,16 @@ class FfmpegMediaProcessor:
                 return frame_count / frame_rate
 
         raise RuntimeError("Unable to determine media duration; install ffprobe or upload WAV audio")
+
+
+def _parse_ffmpeg_duration(stderr_text: str) -> float | None:
+    match = re.search(r"Duration:\s*(\d{2}):(\d{2}):(\d{2}(?:\.\d+)?)", stderr_text)
+    if not match:
+        return None
+    hours = int(match.group(1))
+    minutes = int(match.group(2))
+    seconds = float(match.group(3))
+    return hours * 3600 + minutes * 60 + seconds
 
 
 def _resolve_ffmpeg_binary() -> str | None:
