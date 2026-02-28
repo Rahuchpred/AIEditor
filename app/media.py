@@ -61,6 +61,144 @@ class FfmpegMediaProcessor:
         if completed.returncode != 0:
             raise RuntimeError(completed.stderr.strip() or "ffmpeg failed to normalize media")
 
+    def detect_silence(
+        self,
+        file_path: Path,
+        threshold_db: float = -30,
+        min_duration: float = 0.4,
+    ) -> list[dict[str, float]]:
+        ffmpeg = _resolve_ffmpeg_binary()
+        if ffmpeg is None:
+            raise RuntimeError("ffmpeg is required for silence detection")
+
+        command = [
+            ffmpeg, "-i", str(file_path),
+            "-af", f"silencedetect=noise={threshold_db}dB:d={min_duration}",
+            "-f", "null", "-",
+        ]
+        completed = subprocess.run(command, capture_output=True, text=True, check=False)
+        return _parse_silence_regions(completed.stderr)
+
+    def trim_keep_ranges(
+        self,
+        input_path: Path,
+        output_path: Path,
+        keep_ranges: list[tuple[float, float]],
+    ) -> None:
+        ffmpeg = _resolve_ffmpeg_binary()
+        if ffmpeg is None:
+            raise RuntimeError("ffmpeg is required for trimming")
+        if not keep_ranges:
+            raise RuntimeError("No segments to keep")
+
+        n = len(keep_ranges)
+        filter_parts: list[str] = []
+        concat_inputs = ""
+        for i, (start, end) in enumerate(keep_ranges):
+            filter_parts.append(
+                f"[0:v]trim=start={start}:end={end},setpts=PTS-STARTPTS[v{i}];"
+                f"[0:a]atrim=start={start}:end={end},asetpts=PTS-STARTPTS[a{i}];"
+            )
+            concat_inputs += f"[v{i}][a{i}]"
+
+        filter_complex = "".join(filter_parts) + f"{concat_inputs}concat=n={n}:v=1:a=1[outv][outa]"
+
+        command = [
+            ffmpeg, "-y", "-i", str(input_path),
+            "-filter_complex", filter_complex,
+            "-map", "[outv]", "-map", "[outa]",
+            "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+            "-c:a", "aac", "-b:a", "128k",
+            str(output_path),
+        ]
+        completed = subprocess.run(command, capture_output=True, text=True, check=False)
+        if completed.returncode != 0:
+            raise RuntimeError(completed.stderr.strip() or "ffmpeg trim+concat failed")
+
+    def auto_cut_clip(
+        self,
+        input_path: Path,
+        output_path: Path,
+        target_duration: float = 5.0,
+        max_duration: float = 7.0,
+    ) -> None:
+        """Trim a clip to target_duration if longer than max_duration. Keeps centered segment."""
+        ffmpeg = _resolve_ffmpeg_binary()
+        if ffmpeg is None:
+            raise RuntimeError("ffmpeg is required for auto-cut")
+
+        duration = self._probe_duration(input_path)
+        if duration <= max_duration:
+            start = 0.0
+            end = duration
+        else:
+            start = max(0.0, (duration - target_duration) / 2)
+            end = min(duration, start + target_duration)
+
+        command = [
+            ffmpeg, "-y", "-i", str(input_path),
+            "-ss", str(start), "-t", str(end - start),
+            "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+            "-c:a", "aac", "-b:a", "128k",
+            str(output_path),
+        ]
+        completed = subprocess.run(command, capture_output=True, text=True, check=False)
+        if completed.returncode != 0:
+            raise RuntimeError(completed.stderr.strip() or "ffmpeg auto-cut failed")
+
+    def concat_clips_with_audio(
+        self,
+        clip_paths: list[Path],
+        audio_path: Path,
+        output_path: Path,
+        width: int = 1080,
+        height: int = 1920,
+    ) -> None:
+        """Concatenate B-roll clips (scaled to width x height) and overlay voiceover audio."""
+        ffmpeg = _resolve_ffmpeg_binary()
+        if ffmpeg is None:
+            raise RuntimeError("ffmpeg is required for concat")
+        if not clip_paths:
+            raise RuntimeError("No clips to concatenate")
+
+        n = len(clip_paths)
+        durations = [self._probe_duration(p) for p in clip_paths]
+
+        filter_parts: list[str] = []
+        concat_inputs = ""
+        for i, (path, dur) in enumerate(zip(clip_paths, durations)):
+            scale_pad = (
+                f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+                f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2"
+            )
+            filter_parts.append(
+                f"[{i}:v]{scale_pad},setpts=PTS-STARTPTS[v{i}];"
+                f"anullsrc=channel_layout=stereo:sample_rate=44100,"
+                f"atrim=0:{dur},asetpts=PTS-STARTPTS[a{i}];"
+            )
+            concat_inputs += f"[v{i}][a{i}]"
+
+        filter_complex = "".join(filter_parts) + f"{concat_inputs}concat=n={n}:v=1:a=1[outv][outa]"
+
+        inputs = [str(p) for p in clip_paths] + [str(audio_path)]
+        flat_inputs: list[str] = []
+        for inp in inputs:
+            flat_inputs.extend(["-i", inp])
+
+        command = [
+            ffmpeg, "-y",
+            *flat_inputs,
+            "-filter_complex", filter_complex,
+            "-map", "[outv]", "-map", f"{n}:a",
+            "-shortest",
+            "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+            "-c:a", "aac", "-b:a", "128k",
+            str(output_path),
+        ]
+        completed = subprocess.run(command, capture_output=True, text=True, check=False)
+        if completed.returncode != 0:
+            raise RuntimeError(completed.stderr.strip() or "ffmpeg concat+audio failed")
+
     def _probe_duration(self, file_path: Path) -> float:
         ffprobe = shutil.which("ffprobe")
         if ffprobe is not None:
@@ -98,6 +236,18 @@ class FfmpegMediaProcessor:
                 return frame_count / frame_rate
 
         raise RuntimeError("Unable to determine media duration; install ffprobe or upload WAV audio")
+
+
+def _parse_silence_regions(stderr_text: str) -> list[dict[str, float]]:
+    regions: list[dict[str, float]] = []
+    starts = re.findall(r"silence_start:\s*([\d.]+)", stderr_text)
+    ends = re.findall(r"silence_end:\s*([\d.]+)", stderr_text)
+    for i, start_str in enumerate(starts):
+        start = float(start_str)
+        end = float(ends[i]) if i < len(ends) else None
+        if end is not None:
+            regions.append({"start_s": round(start, 3), "end_s": round(end, 3)})
+    return regions
 
 
 def _parse_ffmpeg_duration(stderr_text: str) -> float | None:
