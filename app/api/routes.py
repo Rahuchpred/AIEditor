@@ -169,8 +169,8 @@ def ui_playground() -> str:
     const out = document.getElementById("out");
     const jobInput = document.getElementById("job_id");
 
-    function show(value) {
-      out.textContent = typeof value === "string" ? value : JSON.stringify(value, null, 2);
+    function showTranscript(value) {
+      out.textContent = String(value ?? "").trim() || "{}";
     }
 
     async function readJsonOrText(response) {
@@ -183,10 +183,9 @@ def ui_playground() -> str:
 
     document.getElementById("createForm").addEventListener("submit", async (event) => {
       event.preventDefault();
-      const form = event.currentTarget;
       const media = document.getElementById("media_file").files[0];
       if (!media) {
-        show("Please choose a file first.");
+        showTranscript("Please choose a file first.");
         return;
       }
 
@@ -197,29 +196,31 @@ def ui_playground() -> str:
       payload.append("include_raw_transcript", String(document.getElementById("include_raw_transcript").checked));
       payload.append("include_timestamps", String(document.getElementById("include_timestamps").checked));
 
-      show("Submitting...");
+      showTranscript("Processing... this may take a minute.");
       const response = await fetch("/v1/analysis-jobs", { method: "POST", body: payload });
       const data = await readJsonOrText(response);
-      show(data);
       if (response.ok && data && data.job_id) {
         jobInput.value = data.job_id;
+        showTranscript(data);
+      } else {
+        showTranscript(data);
       }
     });
 
     document.getElementById("statusBtn").addEventListener("click", async () => {
       const jobId = jobInput.value.trim();
-      if (!jobId) return show("Enter a job_id first.");
-      show("Loading status...");
+      if (!jobId) return showTranscript("Enter a job id first.");
+      showTranscript("Checking status...");
       const response = await fetch(`/v1/analysis-jobs/${encodeURIComponent(jobId)}`);
-      show(await readJsonOrText(response));
+      showTranscript(await readJsonOrText(response));
     });
 
     document.getElementById("resultBtn").addEventListener("click", async () => {
       const jobId = jobInput.value.trim();
-      if (!jobId) return show("Enter a job_id first.");
-      show("Loading result...");
+      if (!jobId) return showTranscript("Enter a job id first.");
+      showTranscript("Loading result...");
       const response = await fetch(`/v1/analysis-jobs/${encodeURIComponent(jobId)}/result`);
-      show(await readJsonOrText(response));
+      showTranscript(await readJsonOrText(response));
     });
   </script>
 </body>
