@@ -200,6 +200,8 @@ class AnalysisJobService:
                 session.commit()
             except TranscriptionProviderError as exc:
                 self._mark_failed(session, job, ErrorCode.TRANSCRIPTION_FAILED, str(exc))
+            except RuntimeError as exc:
+                self._mark_failed(session, job, ErrorCode.TRANSCRIPTION_FAILED, str(exc))
             finally:
                 input_path.unlink(missing_ok=True)
                 normalized_audio_path.unlink(missing_ok=True)
