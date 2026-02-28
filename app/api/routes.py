@@ -394,6 +394,42 @@ def ui_playground() -> str:
     const tlCtx = tlCanvas.getContext("2d");
     const tlState = { dragging: false, hoverActive: false };
 
+    let thumbVideo = null;
+    let thumbBusy = false;
+    const THUMB_MAX = 120;
+
+    function sizeCanvasToVideo() {
+      const cw = 160, ch = 90;
+      tlCanvas.width = cw;
+      tlCanvas.height = ch;
+      tlCanvas.style.width = cw + "px";
+      tlCanvas.style.height = ch + "px";
+    }
+
+    previewVideo.addEventListener("loadedmetadata", sizeCanvasToVideo);
+
+    function ensureThumbVideo() {
+      if (thumbVideo) return;
+      if (!previewVideo.src) return;
+      thumbVideo = document.createElement("video");
+      thumbVideo.src = previewVideo.src;
+      thumbVideo.preload = "auto";
+      thumbVideo.muted = true;
+      thumbVideo.playsInline = true;
+    }
+
+    function drawThumbAtTime(timeSec) {
+      if (!previewVideo.src || !previewState.duration) return;
+      ensureThumbVideo();
+      if (!thumbVideo || thumbBusy) return;
+      thumbBusy = true;
+      thumbVideo.currentTime = Math.max(0, Math.min(timeSec, previewState.duration));
+      thumbVideo.onseeked = function () {
+        tlCtx.drawImage(thumbVideo, 0, 0, tlCanvas.width, tlCanvas.height);
+        thumbBusy = false;
+      };
+    }
+
     function tlPctFromEvent(e) {
       const rect = tlContainer.getBoundingClientRect();
       return Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
@@ -408,6 +444,7 @@ def ui_playground() -> str:
 
     previewVideo.addEventListener("timeupdate", tlUpdatePositions);
     document.getElementById("media_file").addEventListener("change", function () {
+      if (thumbVideo) { thumbVideo.src = ""; thumbVideo = null; }
       tlFill.style.width = "0%";
       tlPlayhead.style.left = "0%";
     });
@@ -423,6 +460,7 @@ def ui_playground() -> str:
       tlPreview.classList.add("show");
       tlHoverLine.style.left = px + "px";
       tlHoverLine.style.display = "block";
+      drawThumbAtTime(timeSec);
     }
 
     function tlHidePreview() {
