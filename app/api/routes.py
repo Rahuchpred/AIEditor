@@ -263,41 +263,52 @@ def ui_playground() -> str:
         showTranscript("Please choose a file first.");
         return;
       }
+      try {
+        const payload = new FormData();
+        payload.append("media_file", media);
+        const hint = document.getElementById("input_language_hint").value.trim();
+        if (hint) payload.append("input_language_hint", hint);
+        payload.append("include_raw_transcript", String(document.getElementById("include_raw_transcript").checked));
+        payload.append("include_timestamps", String(document.getElementById("include_timestamps").checked));
 
-      const payload = new FormData();
-      payload.append("media_file", media);
-      const hint = document.getElementById("input_language_hint").value.trim();
-      if (hint) payload.append("input_language_hint", hint);
-      payload.append("include_raw_transcript", String(document.getElementById("include_raw_transcript").checked));
-      payload.append("include_timestamps", String(document.getElementById("include_timestamps").checked));
-
-      showTranscript("Processing... this may take a minute.");
-      const response = await fetch("/v1/analysis-jobs", { method: "POST", body: payload });
-      const data = await readJsonOrText(response);
-      if (response.ok && data && data.job_id) {
-        jobInput.value = data.job_id;
-        const result = await getTranscriptForJob(data);
-        showTranscript(result.ok ? result.text : `Error: ${result.error}`);
-      } else {
-        const message = extractErrorMessage(data, "Failed to submit job");
-        showTranscript(`Error: ${message}`);
+        showTranscript("Processing... this may take a minute.");
+        const response = await fetch("/v1/analysis-jobs", { method: "POST", body: payload });
+        const data = await readJsonOrText(response);
+        if (response.ok && data && data.job_id) {
+          jobInput.value = data.job_id;
+          const result = await getTranscriptForJob(data);
+          showTranscript(result.ok ? result.text : `Error: ${result.error}`);
+        } else {
+          const message = extractErrorMessage(data, "Failed to submit job");
+          showTranscript(`Error: ${message}`);
+        }
+      } catch (err) {
+        showTranscript(`Error: ${err.message || "Network request failed"}`);
       }
     });
 
     document.getElementById("statusBtn").addEventListener("click", async () => {
       const jobId = jobInput.value.trim();
       if (!jobId) return showTranscript("Enter a job id first.");
-      showTranscript("Checking status...");
-      const result = await waitForTranscript(jobId);
-      showTranscript(result.ok ? result.text : `Error: ${result.error}`);
+      try {
+        showTranscript("Checking status...");
+        const result = await waitForTranscript(jobId);
+        showTranscript(result.ok ? result.text : `Error: ${result.error}`);
+      } catch (err) {
+        showTranscript(`Error: ${err.message || "Network request failed"}`);
+      }
     });
 
     document.getElementById("resultBtn").addEventListener("click", async () => {
       const jobId = jobInput.value.trim();
       if (!jobId) return showTranscript("Enter a job id first.");
-      showTranscript("Loading result...");
-      const result = await fetchTranscript(jobId);
-      showTranscript(result.ok ? result.text : `Error: ${result.error}`);
+      try {
+        showTranscript("Loading result...");
+        const result = await fetchTranscript(jobId);
+        showTranscript(result.ok ? result.text : `Error: ${result.error}`);
+      } catch (err) {
+        showTranscript(`Error: ${err.message || "Network request failed"}`);
+      }
     });
   </script>
 </body>
