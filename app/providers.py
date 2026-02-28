@@ -9,10 +9,15 @@ import httpx
 from app.config import Settings
 from app.constants import DEFAULT_ENGLISH_LANGUAGE_CODE, DEFAULT_TIPS_COUNT
 from app.prompts import build_caption_cleanup_prompt, build_rewrite_prompt, build_tips_prompt
-from app.schemas import CorrectedCaptions, TimedTextSegment, TranscriptionResult
+from app.reel_prompts import build_reel_script_prompt
+from app.schemas import CorrectedCaptions, ReelScript, TimedTextSegment, TranscriptionResult
 
 
 class TranscriptionProviderError(RuntimeError):
+    pass
+
+
+class VoiceCloningProviderError(RuntimeError):
     pass
 
 
@@ -125,6 +130,167 @@ class HttpElevenLabsTranscriptionProvider:
         if not text:
             return []
         return [TimedTextSegment(start_ms=0, end_ms=None, text=text)]
+
+    def _post_with_retries(self, url: str, **kwargs: Any) -> httpx.Response:
+        response: httpx.Response | None = None
+        for attempt in range(1, self._MAX_ATTEMPTS + 1):
+            response = self._client.post(url, **kwargs)
+            if not _is_transient_status(response.status_code) or attempt == self._MAX_ATTEMPTS:
+                break
+            time.sleep(_retry_backoff_seconds(attempt))
+        assert response is not None
+        return response
+
+
+class ElevenLabsVoiceCloningProvider:
+    """ElevenLabs voice cloning and text-to-speech."""
+
+    _MAX_ATTEMPTS = 3
+    _BASE_URL = "https://api.elevenlabs.io/v1"
+
+    def __init__(self, settings: Settings):
+        self._settings = settings
+        self._client = httpx.Client(timeout=settings.provider_timeout_seconds)
+
+    def clone_voice(self, name: str, audio_files: list[tuple[str, bytes]]) -> str:
+        """Create an instant voice clone from audio samples. Returns voice_id."""
+        if not self._settings.elevenlabs_api_key:
+            raise VoiceCloningProviderError("Missing ElevenLabs API key")
+        if not audio_files:
+            raise VoiceCloningProviderError("At least one audio file is required for voice cloning")
+
+        def _content_type(fn: str) -> str:
+            fn = fn.lower()
+            if fn.endswith(".wav"):
+                return "audio/wav"
+            if fn.endswith(".mp3") or fn.endswith(".mpeg"):
+                return "audio/mpeg"
+            return "audio/mpeg"
+
+        files = [
+            ("files", (filename, content, _content_type(filename)))
+            for filename, content in audio_files
+        ]
+        data = {"name": name}
+
+        try:
+            response = self._post_with_retries(
+                f"{self._BASE_URL}/voices/add",
+                headers={"xi-api-key": self._settings.elevenlabs_api_key},
+                data=data,
+                files=files,
+            )
+        except httpx.TimeoutException as exc:
+            raise VoiceCloningProviderError("ElevenLabs voice cloning timed out") from exc
+        except httpx.HTTPError as exc:
+            raise VoiceCloningProviderError("ElevenLabs voice cloning request failed") from exc
+
+        if response.status_code >= 400:
+            detail = _safe_http_error_detail(response)
+            raise VoiceCloningProviderError(
+                f"ElevenLabs voice cloning returned HTTP {response.status_code}: {detail}"
+            )
+
+        try:
+            body = response.json()
+        except ValueError as exc:
+            raise VoiceCloningProviderError("ElevenLabs returned invalid JSON") from exc
+
+        voice_id = body.get("voice_id")
+        if not voice_id:
+            raise VoiceCloningProviderError("ElevenLabs did not return a voice_id")
+        return str(voice_id)
+
+    def text_to_speech(self, voice_id: str, text: str) -> bytes:
+        """Generate speech from text using the given voice. Returns MP3 audio bytes."""
+        if not self._settings.elevenlabs_api_key:
+            raise VoiceCloningProviderError("Missing ElevenLabs API key")
+
+        url = f"{self._BASE_URL}/text-to-speech/{voice_id}"
+        params = {"output_format": "mp3_44100_128"}
+
+        try:
+            response = self._post_with_retries(
+                url,
+                headers={
+                    "xi-api-key": self._settings.elevenlabs_api_key,
+                    "Content-Type": "application/json",
+                },
+                params=params,
+                json={
+                    "text": text,
+                    "model_id": getattr(
+                        self._settings,
+                        "elevenlabs_tts_model_id",
+                        "eleven_multilingual_v2",
+                    ),
+                },
+            )
+        except httpx.TimeoutException as exc:
+            raise VoiceCloningProviderError("ElevenLabs TTS timed out") from exc
+        except httpx.HTTPError as exc:
+            raise VoiceCloningProviderError("ElevenLabs TTS request failed") from exc
+
+        if response.status_code >= 400:
+            detail = _safe_http_error_detail(response)
+            raise VoiceCloningProviderError(
+                f"ElevenLabs TTS returned HTTP {response.status_code}: {detail}"
+            )
+
+        return response.content
+
+    def list_voices(self) -> list[dict[str, Any]]:
+        """List all voices (including cloned). Returns list of voice objects."""
+        if not self._settings.elevenlabs_api_key:
+            raise VoiceCloningProviderError("Missing ElevenLabs API key")
+
+        try:
+            response = self._client.get(
+                f"{self._BASE_URL}/voices",
+                headers={"xi-api-key": self._settings.elevenlabs_api_key},
+            )
+        except httpx.TimeoutException as exc:
+            raise VoiceCloningProviderError("ElevenLabs list voices timed out")
+        except httpx.HTTPError as exc:
+            raise VoiceCloningProviderError("ElevenLabs list voices request failed")
+
+        if response.status_code >= 400:
+            detail = _safe_http_error_detail(response)
+            raise VoiceCloningProviderError(
+                f"ElevenLabs list voices returned HTTP {response.status_code}: {detail}"
+            )
+
+        try:
+            body = response.json()
+        except ValueError as exc:
+            raise VoiceCloningProviderError("ElevenLabs returned invalid JSON")
+
+        voices = body.get("voices") or []
+        return [
+            {"voice_id": v.get("voice_id"), "name": v.get("name", "Unknown")}
+            for v in voices
+        ]
+
+    def delete_voice(self, voice_id: str) -> None:
+        """Delete a cloned voice."""
+        if not self._settings.elevenlabs_api_key:
+            raise VoiceCloningProviderError("Missing ElevenLabs API key")
+
+        try:
+            response = self._client.delete(
+                f"{self._BASE_URL}/voices/{voice_id}",
+                headers={"xi-api-key": self._settings.elevenlabs_api_key},
+            )
+        except httpx.TimeoutException as exc:
+            raise VoiceCloningProviderError("ElevenLabs delete voice timed out")
+        except httpx.HTTPError as exc:
+            raise VoiceCloningProviderError("ElevenLabs delete voice request failed")
+
+        if response.status_code >= 400:
+            detail = _safe_http_error_detail(response)
+            raise VoiceCloningProviderError(
+                f"ElevenLabs delete voice returned HTTP {response.status_code}: {detail}"
+            )
 
     def _post_with_retries(self, url: str, **kwargs: Any) -> httpx.Response:
         response: httpx.Response | None = None
@@ -251,6 +417,103 @@ class MistralLLMProvider:
             return json.loads(stripped)
         except ValueError as exc:
             raise LLMProviderError(f"Mistral {context} response was not valid JSON") from exc
+
+    def _post_with_retries(self, url: str, **kwargs: Any) -> httpx.Response:
+        response: httpx.Response | None = None
+        for attempt in range(1, self._MAX_ATTEMPTS + 1):
+            response = self._client.post(url, **kwargs)
+            if not _is_transient_status(response.status_code) or attempt == self._MAX_ATTEMPTS:
+                break
+            time.sleep(_retry_backoff_seconds(attempt))
+        assert response is not None
+        return response
+
+
+class MistralReelScriptProvider:
+    """Mistral-based viral reel script generation with structured JSON output."""
+
+    _MAX_ATTEMPTS = 3
+
+    def __init__(self, settings: Settings):
+        self._settings = settings
+        self._client = httpx.Client(timeout=settings.provider_timeout_seconds)
+
+    def generate_reel_script(self, rough_idea: str, clip_count: int = 5) -> ReelScript:
+        """Generate a viral reel script from a rough idea. Uses JSON mode for structured output."""
+        if not self._settings.mistral_api_key:
+            raise LLMProviderError("Missing Mistral API key")
+
+        prompt = build_reel_script_prompt(rough_idea, clip_count)
+
+        try:
+            response = self._post_with_retries(
+                self._settings.mistral_api_url,
+                headers={"Authorization": f"Bearer {self._settings.mistral_api_key}"},
+                json={
+                    "model": self._settings.mistral_model,
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": (
+                                "Output only valid JSON. No markdown, no code fences, no extra text. "
+                                "Match the exact schema requested."
+                            ),
+                        },
+                        {"role": "user", "content": prompt},
+                    ],
+                    "response_format": {"type": "json_object"},
+                },
+            )
+        except httpx.TimeoutException as exc:
+            raise LLMTimeoutError("Mistral reel script request timed out") from exc
+        except httpx.HTTPError as exc:
+            raise LLMProviderError("Mistral reel script request failed") from exc
+
+        if response.status_code >= 400:
+            detail = _safe_http_error_detail(response)
+            raise LLMProviderError(f"Mistral returned HTTP {response.status_code}: {detail}")
+
+        try:
+            body = response.json()
+        except ValueError as exc:
+            raise LLMProviderError("Mistral returned invalid JSON") from exc
+
+        choices = body.get("choices") or []
+        if not choices:
+            raise LLMProviderError("Mistral returned no choices")
+        message = choices[0].get("message", {})
+        content = message.get("content", "")
+        if isinstance(content, list):
+            content = "".join(str(item.get("text", "")).strip() for item in content)
+        content = str(content)
+
+        stripped = _strip_code_fences(content)
+        try:
+            payload = json.loads(stripped)
+        except ValueError as exc:
+            raise LLMProviderError("Mistral reel script response was not valid JSON") from exc
+
+        hook = str(payload.get("hook", "")).strip() or "Hook"
+        body_segments = payload.get("body") or []
+        if not isinstance(body_segments, list):
+            body_segments = [str(body_segments)]
+        body_segments = [str(s).strip() for s in body_segments if str(s).strip()]
+        cta = str(payload.get("cta", "")).strip() or "Follow for more!"
+        full_narration = str(payload.get("full_narration", "")).strip()
+        if not full_narration:
+            full_narration = hook + " " + " ".join(body_segments) + " " + cta
+        hashtags = payload.get("hashtags") or []
+        if not isinstance(hashtags, list):
+            hashtags = [str(hashtags)]
+        hashtags = [str(h).strip() for h in hashtags if str(h).strip()]
+
+        return ReelScript(
+            hook=hook,
+            body=body_segments,
+            cta=cta,
+            full_narration=full_narration,
+            hashtags=hashtags,
+        )
 
     def _post_with_retries(self, url: str, **kwargs: Any) -> httpx.Response:
         response: httpx.Response | None = None
