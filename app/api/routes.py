@@ -159,6 +159,86 @@ def ui_playground() -> str:
       margin-left: auto;
       font-variant-numeric: tabular-nums;
     }
+    .tl-container {
+      position: relative;
+      height: 36px;
+      cursor: pointer;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+    .tl-track {
+      position: absolute;
+      top: 14px;
+      left: 0;
+      right: 0;
+      height: 8px;
+      background: #1a2744;
+      border-radius: 4px;
+      overflow: hidden;
+    }
+    .tl-fill {
+      height: 100%;
+      width: 0%;
+      background: linear-gradient(90deg, var(--brand) 0%, #6b9aff 100%);
+      border-radius: 4px;
+      transition: width 0.05s linear;
+    }
+    .tl-playhead {
+      position: absolute;
+      top: 8px;
+      width: 18px;
+      height: 18px;
+      margin-left: -9px;
+      border-radius: 50%;
+      background: var(--brand);
+      border: 3px solid #e7eefc;
+      box-shadow: 0 0 6px rgba(79, 124, 255, 0.5);
+      left: 0%;
+      transition: left 0.05s linear;
+      z-index: 2;
+    }
+    .tl-playhead:hover, .tl-playhead.dragging {
+      transform: scale(1.25);
+      box-shadow: 0 0 12px rgba(79, 124, 255, 0.7);
+    }
+    .tl-hover-line {
+      position: absolute;
+      top: 10px;
+      width: 1px;
+      height: 16px;
+      background: rgba(255,255,255,0.3);
+      pointer-events: none;
+      display: none;
+      z-index: 1;
+    }
+    .tl-preview-overlay {
+      position: absolute;
+      bottom: 42px;
+      transform: translateX(-50%);
+      background: #0d1629;
+      border: 1px solid #2a385a;
+      border-radius: 6px;
+      padding: 4px;
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity 0.15s ease;
+      z-index: 10;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+    }
+    .tl-preview-overlay.show { opacity: 1; }
+    .tl-preview-canvas {
+      display: block;
+      border-radius: 4px;
+      background: #060d1a;
+    }
+    .tl-preview-time {
+      display: block;
+      text-align: center;
+      font-size: 11px;
+      color: var(--muted);
+      margin-top: 3px;
+      font-variant-numeric: tabular-nums;
+    }
   </style>
 </head>
 <body>
@@ -215,6 +295,15 @@ def ui_playground() -> str:
       <div class="preview-controls">
         <button id="playPauseBtn" type="button">Play</button>
         <span id="timeDisplay" class="preview-time">0:00 / 0:00</span>
+      </div>
+      <div id="tlContainer" class="tl-container">
+        <div class="tl-track"><div id="tlFill" class="tl-fill"></div></div>
+        <div id="tlPlayhead" class="tl-playhead"></div>
+        <div id="tlHoverLine" class="tl-hover-line"></div>
+        <div id="tlPreview" class="tl-preview-overlay">
+          <canvas id="tlCanvas" class="tl-preview-canvas"></canvas>
+          <span id="tlPreviewTime" class="tl-preview-time">0:00</span>
+        </div>
       </div>
     </div>
     <pre id="out">{}</pre>
@@ -293,6 +382,96 @@ def ui_playground() -> str:
       }
     });
     // --- End Video Preview Panel ---
+
+    // --- Advanced Playback Timeline ---
+    const tlContainer = document.getElementById("tlContainer");
+    const tlFill = document.getElementById("tlFill");
+    const tlPlayhead = document.getElementById("tlPlayhead");
+    const tlHoverLine = document.getElementById("tlHoverLine");
+    const tlPreview = document.getElementById("tlPreview");
+    const tlCanvas = document.getElementById("tlCanvas");
+    const tlPreviewTime = document.getElementById("tlPreviewTime");
+    const tlCtx = tlCanvas.getContext("2d");
+    const tlState = { dragging: false, hoverActive: false };
+
+    function tlPctFromEvent(e) {
+      const rect = tlContainer.getBoundingClientRect();
+      return Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+    }
+
+    function tlUpdatePositions() {
+      if (!previewState.duration) return;
+      const pct = (previewState.currentTime / previewState.duration) * 100;
+      tlFill.style.width = pct + "%";
+      tlPlayhead.style.left = pct + "%";
+    }
+
+    previewVideo.addEventListener("timeupdate", tlUpdatePositions);
+    document.getElementById("media_file").addEventListener("change", function () {
+      tlFill.style.width = "0%";
+      tlPlayhead.style.left = "0%";
+    });
+
+    function tlShowPreview(e, pct) {
+      const timeSec = pct * previewState.duration;
+      tlPreviewTime.textContent = fmtTime(timeSec);
+      const rect = tlContainer.getBoundingClientRect();
+      const px = pct * rect.width;
+      const half = (tlCanvas.offsetWidth + 8) / 2 || 40;
+      const clamped = Math.max(half, Math.min(rect.width - half, px));
+      tlPreview.style.left = clamped + "px";
+      tlPreview.classList.add("show");
+      tlHoverLine.style.left = px + "px";
+      tlHoverLine.style.display = "block";
+    }
+
+    function tlHidePreview() {
+      tlPreview.classList.remove("show");
+      tlHoverLine.style.display = "none";
+    }
+
+    tlContainer.addEventListener("mousemove", function (e) {
+      if (!previewState.duration) return;
+      const pct = tlPctFromEvent(e);
+      tlShowPreview(e, pct);
+      tlState.hoverActive = true;
+    });
+
+    tlContainer.addEventListener("mouseleave", function () {
+      if (!tlState.dragging) tlHidePreview();
+      tlState.hoverActive = false;
+    });
+
+    tlContainer.addEventListener("mousedown", function (e) {
+      if (!previewState.duration) return;
+      e.preventDefault();
+      tlState.dragging = true;
+      tlPlayhead.classList.add("dragging");
+      const pct = tlPctFromEvent(e);
+      previewVideo.currentTime = pct * previewState.duration;
+      previewState.currentTime = previewVideo.currentTime;
+      updateTimeDisplay();
+      tlUpdatePositions();
+      tlShowPreview(e, pct);
+    });
+
+    document.addEventListener("mousemove", function (e) {
+      if (!tlState.dragging) return;
+      const pct = tlPctFromEvent(e);
+      previewVideo.currentTime = pct * previewState.duration;
+      previewState.currentTime = previewVideo.currentTime;
+      updateTimeDisplay();
+      tlUpdatePositions();
+      tlShowPreview(e, pct);
+    });
+
+    document.addEventListener("mouseup", function () {
+      if (!tlState.dragging) return;
+      tlState.dragging = false;
+      tlPlayhead.classList.remove("dragging");
+      if (!tlState.hoverActive) tlHidePreview();
+    });
+    // --- End Advanced Playback Timeline ---
 
     function showTranscript(value) {
       out.textContent = String(value ?? "").trim() || "{}";
