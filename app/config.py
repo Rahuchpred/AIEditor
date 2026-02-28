@@ -34,6 +34,10 @@ class Settings(BaseSettings):
         default="scribe_v1",
         validation_alias=AliasChoices("AIEDIT_ELEVENLABS_MODEL_ID", "ELEVENLABS_MODEL_ID"),
     )
+    elevenlabs_tts_model_id: str = Field(
+        default="eleven_multilingual_v2",
+        validation_alias=AliasChoices("AIEDIT_ELEVENLABS_TTS_MODEL_ID", "ELEVENLABS_TTS_MODEL_ID"),
+    )
 
     mistral_api_key: str | None = Field(
         default=None,
