@@ -74,3 +74,31 @@ class MediaInfo(BaseModel):
 class ProviderResponseError(BaseModel):
     detail: str
     metadata: dict[str, Any] | None = None
+
+
+# --- Reel Generator schemas ---
+
+
+class ReelScript(BaseModel):
+    """Viral Instagram reel script with hook, body, CTA."""
+
+    hook: str
+    body: list[str]
+    cta: str
+    full_narration: str
+    hashtags: list[str]
+
+
+class VoiceProfile(BaseModel):
+    """ElevenLabs cloned voice profile."""
+
+    voice_id: str
+    name: str
+
+
+class ReelScriptRequest(BaseModel):
+    """Request to generate a reel script."""
+
+    rough_idea: str
+    clip_count: int = 5
+
