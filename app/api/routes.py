@@ -181,6 +181,31 @@ def ui_playground() -> str:
       return await response.text();
     }
 
+    function extractTranscript(payload) {
+      if (!payload || typeof payload !== "object") return "";
+      const segments = payload.transcript && Array.isArray(payload.transcript.segments)
+        ? payload.transcript.segments
+        : [];
+      return segments
+        .map((segment) => String(segment && segment.text ? segment.text : "").trim())
+        .filter(Boolean)
+        .join(" ")
+        .replace(/\s+/g, " ")
+        .trim();
+    }
+
+    function extractErrorMessage(payload, fallback) {
+      if (!payload || typeof payload !== "object") return fallback;
+      const detail = payload.detail;
+      if (typeof detail === "string" && detail.trim()) return detail.trim();
+      if (detail && typeof detail === "object") {
+        if (typeof detail.message === "string" && detail.message.trim()) return detail.message.trim();
+        if (typeof detail.code === "string" && detail.code.trim()) return detail.code.trim();
+      }
+      if (typeof payload === "string" && payload.trim()) return payload.trim();
+      return fallback;
+    }
+
     document.getElementById("createForm").addEventListener("submit", async (event) => {
       event.preventDefault();
       const media = document.getElementById("media_file").files[0];
