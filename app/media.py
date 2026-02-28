@@ -38,7 +38,7 @@ class FfmpegMediaProcessor:
         )
 
     def normalize_to_wav(self, input_path: Path, output_path: Path) -> None:
-        ffmpeg = shutil.which("ffmpeg")
+        ffmpeg = _resolve_ffmpeg_binary()
         if ffmpeg is None:
             if input_path.suffix.lower() == ".wav":
                 shutil.copyfile(input_path, output_path)
@@ -89,3 +89,15 @@ class FfmpegMediaProcessor:
                 return frame_count / frame_rate
 
         raise RuntimeError("Unable to determine media duration; install ffprobe or upload WAV audio")
+
+
+def _resolve_ffmpeg_binary() -> str | None:
+    system_ffmpeg = shutil.which("ffmpeg")
+    if system_ffmpeg:
+        return system_ffmpeg
+    try:
+        import imageio_ffmpeg
+
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return None
