@@ -11,6 +11,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from starlette.background import BackgroundTask
 
 from app.container import get_settings
+from app.hook_catalog import HookCatalogError, get_hook_catalog_service
 from app.media import FfmpegMediaProcessor
 from app.providers import ElevenLabsVoiceCloningProvider, MistralReelScriptProvider, VoiceCloningProviderError
 from app.providers import LLMProviderError
@@ -83,6 +84,7 @@ _REEL_UI_HTML = """<!doctype html>
     button:disabled { opacity: 0.5; cursor: not-allowed; }
     .ghost { background: transparent; color: #ccdbff; border-color: #5371b7; }
     .ghost:hover { background: rgba(79, 124, 255, 0.12); }
+    .ghost:disabled { background: transparent; }
     .script-section { margin: 10px 0; }
     .script-section label { font-weight: 600; }
     .script-section [contenteditable] {
@@ -96,6 +98,36 @@ _REEL_UI_HTML = """<!doctype html>
     .status.ok { color: var(--ok); }
     .status.err { color: #ff6b6b; }
     .step { margin-bottom: 24px; }
+    .hook-grid {
+      display: grid;
+      gap: 10px;
+      margin-top: 14px;
+    }
+    .hook-card {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 12px;
+      background: rgba(24, 35, 58, 0.7);
+    }
+    .hook-card.selected {
+      border-color: var(--brand);
+      box-shadow: 0 0 0 1px rgba(79, 124, 255, 0.35);
+    }
+    .hook-card p {
+      margin: 0 0 8px;
+      line-height: 1.45;
+    }
+    .hook-meta {
+      font-size: 12px;
+      color: var(--muted);
+      margin-bottom: 8px;
+    }
+    .hook-source {
+      color: #bfd0ff;
+      font-size: 12px;
+      text-decoration: none;
+    }
+    .hook-source:hover { color: white; }
     select {
       padding: 8px 10px;
       border: 1px solid var(--border);
@@ -134,14 +166,16 @@ _REEL_UI_HTML = """<!doctype html>
 
   <div class="step">
     <div class="card">
-      <h3>Step 2: Reel Input</h3>
+      <h3>Step 2: Idea + Hook Selection</h3>
       <label>Rough idea / topic</label>
       <textarea id="roughIdea" placeholder="e.g. 5 productivity hacks that changed my life"></textarea>
       <label>B-roll clips (5–6 videos, in order)</label>
       <input type="file" id="brollFiles" accept="video/*" multiple />
       <br />
-      <button id="generateScriptBtn" type="button">Generate Script</button>
+      <button id="suggestHooksBtn" type="button">Suggest Hooks</button>
+      <button id="generateScriptBtn" type="button" disabled>Generate Script</button>
       <span id="scriptStatus" class="status"></span>
+      <div id="hookSuggestions" class="hook-grid" style="display:none"></div>
     </div>
   </div>
 
@@ -193,8 +227,10 @@ _REEL_UI_HTML = """<!doctype html>
     const loadVoicesBtn = document.getElementById("loadVoicesBtn");
     const roughIdea = document.getElementById("roughIdea");
     const brollFiles = document.getElementById("brollFiles");
+    const suggestHooksBtn = document.getElementById("suggestHooksBtn");
     const generateScriptBtn = document.getElementById("generateScriptBtn");
     const scriptStatus = document.getElementById("scriptStatus");
+    const hookSuggestions = document.getElementById("hookSuggestions");
     const scriptStep = document.getElementById("scriptStep");
     const scriptHook = document.getElementById("scriptHook");
     const scriptBody = document.getElementById("scriptBody");
@@ -212,11 +248,84 @@ _REEL_UI_HTML = """<!doctype html>
 
     let currentVoiceId = null;
     let currentScript = null;
+    let currentHookSuggestions = [];
+    let currentSelectedHookId = null;
+    let currentSelectedHookText = null;
     let voiceoverBlob = null;
 
     function setStatus(el, msg, ok) {
       el.textContent = msg || "";
       el.className = "status" + (ok === true ? " ok" : ok === false ? " err" : "");
+    }
+
+    function resetScriptOutput() {
+      currentScript = null;
+      voiceoverBlob = null;
+      scriptHook.textContent = "";
+      scriptBody.textContent = "";
+      scriptCta.textContent = "";
+      scriptHashtags.textContent = "";
+      scriptStep.style.display = "none";
+      assembleStep.style.display = "none";
+      voiceoverAudio.removeAttribute("src");
+      finalReel.removeAttribute("src");
+      downloadReel.href = "#";
+    }
+
+    function renderHookSuggestions() {
+      hookSuggestions.innerHTML = "";
+      if (!currentHookSuggestions.length) {
+        hookSuggestions.style.display = "none";
+        return;
+      }
+      hookSuggestions.style.display = "grid";
+      currentHookSuggestions.forEach((item) => {
+        const card = document.createElement("div");
+        card.className = "hook-card" + (item.id === currentSelectedHookId ? " selected" : "");
+
+        const hookText = document.createElement("p");
+        hookText.textContent = item.hook_text || "";
+        card.appendChild(hookText);
+
+        const meta = document.createElement("div");
+        meta.className = "hook-meta";
+        meta.textContent = ((item.section ? item.section + " · " : "") + (item.reason || "")).trim();
+        card.appendChild(meta);
+
+        if (item.source_url) {
+          const source = document.createElement("a");
+          source.className = "hook-source";
+          source.href = item.source_url;
+          source.target = "_blank";
+          source.rel = "noreferrer";
+          source.textContent = "View source";
+          card.appendChild(source);
+        }
+
+        const chooseBtn = document.createElement("button");
+        chooseBtn.type = "button";
+        chooseBtn.className = item.id === currentSelectedHookId ? "ghost" : "";
+        chooseBtn.textContent = item.id === currentSelectedHookId ? "Selected" : "Choose";
+        chooseBtn.addEventListener("click", () => {
+          currentSelectedHookId = item.id;
+          currentSelectedHookText = item.hook_text || null;
+          generateScriptBtn.disabled = false;
+          renderHookSuggestions();
+          setStatus(scriptStatus, "Hook selected. Generate the script next.", true);
+        });
+        card.appendChild(document.createElement("br"));
+        card.appendChild(chooseBtn);
+
+        hookSuggestions.appendChild(card);
+      });
+    }
+
+    function clearHookSelection() {
+      currentHookSuggestions = [];
+      currentSelectedHookId = null;
+      currentSelectedHookText = null;
+      generateScriptBtn.disabled = true;
+      renderHookSuggestions();
     }
 
     async function loadVoices() {
@@ -270,11 +379,55 @@ _REEL_UI_HTML = """<!doctype html>
       }
     });
 
+    roughIdea.addEventListener("input", () => {
+      clearHookSelection();
+      resetScriptOutput();
+      setStatus(scriptStatus, "");
+    });
+
+    suggestHooksBtn.addEventListener("click", async () => {
+      const idea = roughIdea.value?.trim();
+      if (!idea) {
+        setStatus(scriptStatus, "Enter a rough idea", false);
+        return;
+      }
+      try {
+        suggestHooksBtn.disabled = true;
+        generateScriptBtn.disabled = true;
+        resetScriptOutput();
+        setStatus(scriptStatus, "Finding hooks...");
+        const r = await fetch("/v1/reel/suggest-hooks", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ rough_idea: idea, limit: 4 }),
+        });
+        const data = await r.json();
+        if (data.error) throw new Error(data.error);
+        currentHookSuggestions = data.suggestions || [];
+        currentSelectedHookId = null;
+        currentSelectedHookText = null;
+        renderHookSuggestions();
+        if (!currentHookSuggestions.length) {
+          throw new Error("No hook suggestions were returned");
+        }
+        setStatus(scriptStatus, "Choose one of the suggested hooks.", true);
+      } catch (e) {
+        clearHookSelection();
+        setStatus(scriptStatus, "Error: " + e.message, false);
+      } finally {
+        suggestHooksBtn.disabled = false;
+      }
+    });
+
     generateScriptBtn.addEventListener("click", async () => {
       const idea = roughIdea.value?.trim();
       const files = brollFiles.files;
       if (!idea) {
         setStatus(scriptStatus, "Enter a rough idea", false);
+        return;
+      }
+      if (!currentSelectedHookId) {
+        setStatus(scriptStatus, "Choose a hook first", false);
         return;
       }
       const clipCount = files?.length ? Math.min(files.length, 6) : 5;
@@ -284,7 +437,11 @@ _REEL_UI_HTML = """<!doctype html>
         const r = await fetch("/v1/reel/generate-script", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ rough_idea: idea, clip_count: clipCount }),
+          body: JSON.stringify({
+            rough_idea: idea,
+            selected_hook_id: currentSelectedHookId,
+            clip_count: clipCount
+          }),
         });
         const data = await r.json();
         if (data.error) throw new Error(data.error);
@@ -402,6 +559,30 @@ def reel_generator_ui() -> str:
     return _REEL_UI_HTML
 
 
+@router.post("/v1/reel/suggest-hooks")
+async def suggest_hooks(body: dict = Body(...)) -> JSONResponse:
+    """Suggest the best hook options for a rough idea."""
+    settings = get_settings()
+    if not settings.mistral_api_key:
+        return JSONResponse({"error": "Mistral API key not configured"}, status_code=503)
+
+    rough_idea = body.get("rough_idea", "").strip()
+    limit = max(1, min(int(body.get("limit", 4)), 10))
+    if not rough_idea:
+        return JSONResponse({"error": "rough_idea is required"}, status_code=400)
+
+    try:
+        catalog = get_hook_catalog_service(settings.hooks_catalog_path)
+        candidates = catalog.shortlist(rough_idea, limit=max(30, limit))
+        provider = MistralReelScriptProvider(settings)
+        suggestions = provider.suggest_hooks(rough_idea, candidates, limit=limit)
+        return JSONResponse({"suggestions": [item.model_dump() for item in suggestions]})
+    except HookCatalogError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=503)
+    except LLMProviderError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+
 @router.post("/v1/reel/generate-script")
 async def generate_script(body: dict = Body(...)) -> JSONResponse:
     """Generate a viral reel script from rough idea using Mistral."""
@@ -409,13 +590,22 @@ async def generate_script(body: dict = Body(...)) -> JSONResponse:
     if not settings.mistral_api_key:
         return JSONResponse({"error": "Mistral API key not configured"}, status_code=503)
     rough_idea = body.get("rough_idea", "").strip()
+    selected_hook_id = body.get("selected_hook_id", "").strip()
     clip_count = int(body.get("clip_count", 5))
     if not rough_idea:
         return JSONResponse({"error": "rough_idea is required"}, status_code=400)
+    if not selected_hook_id:
+        return JSONResponse({"error": "selected_hook_id is required"}, status_code=400)
     try:
+        catalog = get_hook_catalog_service(settings.hooks_catalog_path)
+        selected_hook = catalog.get_hook(selected_hook_id)
+        if selected_hook is None:
+            return JSONResponse({"error": "selected_hook_id was not found"}, status_code=400)
         provider = MistralReelScriptProvider(settings)
-        script = provider.generate_reel_script(rough_idea, clip_count)
+        script = provider.generate_reel_script(rough_idea, selected_hook, clip_count)
         return JSONResponse(script.model_dump())
+    except HookCatalogError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=503)
     except LLMProviderError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
 
