@@ -2,15 +2,24 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Sequence
 from typing import Any, Protocol
 
 import httpx
 
 from app.config import Settings
 from app.constants import DEFAULT_ENGLISH_LANGUAGE_CODE, DEFAULT_TIPS_COUNT
+from app.experiment_tracking import log_reel_prompt_experiment
 from app.prompts import build_caption_cleanup_prompt, build_rewrite_prompt, build_tips_prompt
-from app.reel_prompts import build_reel_script_prompt
-from app.schemas import CorrectedCaptions, ReelScript, TimedTextSegment, TranscriptionResult
+from app.reel_prompts import build_hook_suggestion_prompt, build_reel_script_prompt
+from app.schemas import (
+    CorrectedCaptions,
+    HookSuggestion,
+    HookTemplate,
+    ReelScript,
+    TimedTextSegment,
+    TranscriptionResult,
+)
 
 
 class TranscriptionProviderError(RuntimeError):
@@ -442,13 +451,139 @@ class MistralReelScriptProvider:
         self._settings = settings
         self._client = httpx.Client(timeout=settings.provider_timeout_seconds)
 
-    def generate_reel_script(self, rough_idea: str, clip_count: int = 5) -> ReelScript:
+    def suggest_hooks(
+        self,
+        rough_idea: str,
+        candidates: Sequence[HookTemplate],
+        limit: int = 4,
+    ) -> list[HookSuggestion]:
+        """Pick the best hook options from a candidate shortlist."""
+        if not self._settings.mistral_api_key:
+            raise LLMProviderError("Missing Mistral API key")
+        if not candidates:
+            return []
+
+        normalized_limit = max(1, min(limit, len(candidates)))
+        prompt = build_hook_suggestion_prompt(rough_idea, list(candidates), normalized_limit)
+        try:
+            payload = self._chat_json(
+                prompt,
+                timeout_error="Mistral hook suggestion request timed out",
+                request_error="Mistral hook suggestion request failed",
+                invalid_json_error="Mistral hook suggestion response was not valid JSON",
+            )
+            parsed = self._parse_hook_suggestions(payload, candidates, normalized_limit)
+            if parsed:
+                return parsed
+        except (LLMProviderError, LLMTimeoutError):
+            pass
+        return _fallback_hook_suggestions(candidates, normalized_limit)
+
+    def generate_reel_script(
+        self,
+        rough_idea: str,
+        selected_hook: HookTemplate | str | int,
+        clip_count: int | None = None,
+    ) -> ReelScript:
         """Generate a viral reel script from a rough idea. Uses JSON mode for structured output."""
         if not self._settings.mistral_api_key:
             raise LLMProviderError("Missing Mistral API key")
 
-        prompt = build_reel_script_prompt(rough_idea, clip_count)
+        resolved_hook, resolved_clip_count = self._resolve_selected_hook(selected_hook, clip_count)
+        prompt = build_reel_script_prompt(
+            rough_idea,
+            resolved_hook.hook_text,
+            resolved_clip_count,
+            resolved_hook.section,
+        )
+        try:
+            payload = self._chat_json(
+                prompt,
+                timeout_error="Mistral reel script request timed out",
+                request_error="Mistral reel script request failed",
+                invalid_json_error="Mistral reel script response was not valid JSON",
+            )
 
+            hook = str(payload.get("hook", "")).strip() or "Hook"
+            body_segments = payload.get("body") or []
+            if not isinstance(body_segments, list):
+                body_segments = [str(body_segments)]
+            body_segments = [str(s).strip() for s in body_segments if str(s).strip()]
+            cta = str(payload.get("cta", "")).strip() or "Follow for more!"
+            full_narration = str(payload.get("full_narration", "")).strip()
+            if not full_narration:
+                full_narration = hook + " " + " ".join(body_segments) + " " + cta
+            hashtags = payload.get("hashtags") or []
+            if not isinstance(hashtags, list):
+                hashtags = [str(hashtags)]
+            hashtags = [str(h).strip() for h in hashtags if str(h).strip()]
+
+            result = ReelScript(
+                hook=hook,
+                body=body_segments,
+                cta=cta,
+                full_narration=full_narration,
+                hashtags=hashtags,
+            )
+        except (LLMProviderError, LLMTimeoutError) as exc:
+            log_reel_prompt_experiment(
+                self._settings,
+                rough_idea,
+                resolved_clip_count,
+                prompt,
+                error=str(exc),
+            )
+            raise
+
+        log_reel_prompt_experiment(
+            self._settings,
+            rough_idea,
+            resolved_clip_count,
+            prompt,
+            result=result,
+        )
+        return result
+
+    def _resolve_selected_hook(
+        self,
+        selected_hook: HookTemplate | str | int,
+        clip_count: int | None,
+    ) -> tuple[HookTemplate, int]:
+        if isinstance(selected_hook, HookTemplate):
+            return selected_hook, clip_count if clip_count is not None else 5
+
+        if isinstance(selected_hook, int) and clip_count is None:
+            return (
+                HookTemplate(
+                    id="legacy",
+                    hook_text="Lead with a concise attention-grabbing hook based on the user's idea.",
+                    source_url=None,
+                    page_number=0,
+                    section=None,
+                ),
+                selected_hook,
+            )
+
+        hook_text = str(selected_hook).strip() or "Lead with a strong hook."
+        return (
+            HookTemplate(
+                id="selected",
+                hook_text=hook_text,
+                source_url=None,
+                page_number=0,
+                section=None,
+            ),
+            clip_count if clip_count is not None else 5,
+        )
+
+    def _chat_json(
+        self,
+        prompt: str,
+        *,
+        timeout_error: str,
+        request_error: str,
+        invalid_json_error: str,
+    ) -> Any:
         try:
             response = self._post_with_retries(
                 self._settings.mistral_api_url,
@@ -469,9 +604,9 @@ class MistralReelScriptProvider:
                 },
             )
         except httpx.TimeoutException as exc:
-            raise LLMTimeoutError("Mistral reel script request timed out") from exc
+            raise LLMTimeoutError(timeout_error) from exc
         except httpx.HTTPError as exc:
-            raise LLMProviderError("Mistral reel script request failed") from exc
+            raise LLMProviderError(request_error) from exc
 
         if response.status_code >= 400:
             detail = _safe_http_error_detail(response)
@@ -489,35 +624,63 @@ class MistralReelScriptProvider:
         content = message.get("content", "")
         if isinstance(content, list):
             content = "".join(str(item.get("text", "")).strip() for item in content)
-        content = str(content)
-
-        stripped = _strip_code_fences(content)
+        stripped = _strip_code_fences(str(content))
         try:
-            payload = json.loads(stripped)
+            return json.loads(stripped)
         except ValueError as exc:
-            raise LLMProviderError("Mistral reel script response was not valid JSON") from exc
+            raise LLMProviderError(invalid_json_error) from exc
 
-        hook = str(payload.get("hook", "")).strip() or "Hook"
-        body_segments = payload.get("body") or []
-        if not isinstance(body_segments, list):
-            body_segments = [str(body_segments)]
-        body_segments = [str(s).strip() for s in body_segments if str(s).strip()]
-        cta = str(payload.get("cta", "")).strip() or "Follow for more!"
-        full_narration = str(payload.get("full_narration", "")).strip()
-        if not full_narration:
-            full_narration = hook + " " + " ".join(body_segments) + " " + cta
-        hashtags = payload.get("hashtags") or []
-        if not isinstance(hashtags, list):
-            hashtags = [str(hashtags)]
-        hashtags = [str(h).strip() for h in hashtags if str(h).strip()]
+    def _parse_hook_suggestions(
+        self,
+        payload: Any,
+        candidates: Sequence[HookTemplate],
+        limit: int,
+    ) -> list[HookSuggestion]:
+        if not isinstance(payload, dict):
+            raise LLMProviderError("Mistral hook suggestion payload was not an object")
 
-        return ReelScript(
-            hook=hook,
-            body=body_segments,
-            cta=cta,
-            full_narration=full_narration,
-            hashtags=hashtags,
-        )
+        raw_suggestions = payload.get("suggestions")
+        if not isinstance(raw_suggestions, list):
+            raise LLMProviderError("Mistral hook suggestion payload did not contain suggestions")
+
+        candidates_by_id = {candidate.id: candidate for candidate in candidates}
+        picked: list[HookSuggestion] = []
+        seen_ids: set[str] = set()
+
+        for item in raw_suggestions:
+            if not isinstance(item, dict):
+                continue
+            hook_id = str(item.get("id", "")).strip()
+            if not hook_id or hook_id in seen_ids:
+                continue
+            candidate = candidates_by_id.get(hook_id)
+            if candidate is None:
+                continue
+            reason = str(item.get("reason", "")).strip() or "Strong fit for the user's idea."
+            picked.append(
+                HookSuggestion(
+                    id=candidate.id,
+                    hook_text=candidate.hook_text,
+                    reason=reason,
+                    section=candidate.section,
+                    source_url=candidate.source_url,
+                )
+            )
+            seen_ids.add(hook_id)
+            if len(picked) >= limit:
+                break
+
+        if len(picked) >= limit:
+            return picked[:limit]
+
+        for suggestion in _fallback_hook_suggestions(candidates, limit):
+            if suggestion.id in seen_ids:
+                continue
+            picked.append(suggestion)
+            seen_ids.add(suggestion.id)
+            if len(picked) >= limit:
+                break
+        return picked
 
     def _post_with_retries(self, url: str, **kwargs: Any) -> httpx.Response:
         response: httpx.Response | None = None
@@ -601,6 +764,21 @@ def _merge_word_segments(word_segments: list[TimedTextSegment]) -> list[TimedTex
             )
         )
     return merged
+
+
+def _fallback_hook_suggestions(candidates: Sequence[HookTemplate], limit: int) -> list[HookSuggestion]:
+    suggestions: list[HookSuggestion] = []
+    for candidate in list(candidates)[:limit]:
+        suggestions.append(
+            HookSuggestion(
+                id=candidate.id,
+                hook_text=candidate.hook_text,
+                reason="Strong lexical match for the user's rough idea.",
+                section=candidate.section,
+                source_url=candidate.source_url,
+            )
+        )
+    return suggestions
 
 
 def _is_transient_status(status_code: int) -> bool:

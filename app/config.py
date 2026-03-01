@@ -52,6 +52,23 @@ class Settings(BaseSettings):
         default="mistral-small-latest",
         validation_alias=AliasChoices("AIEDIT_MISTRAL_MODEL", "MISTRAL_MODEL"),
     )
+    wandb_api_key: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("AIEDIT_WANDB_API_KEY", "WANDB_API_KEY"),
+    )
+    wandb_project: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("AIEDIT_WANDB_PROJECT", "WANDB_PROJECT"),
+    )
+    wandb_entity: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("AIEDIT_WANDB_ENTITY", "WANDB_ENTITY"),
+    )
+    wandb_log_reel_prompts: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("AIEDIT_WANDB_LOG_REEL_PROMPTS", "WANDB_LOG_REEL_PROMPTS"),
+    )
+    hooks_catalog_path: str = "output/hooks/viral_hooks.json"
     provider_timeout_seconds: float = Field(default=60.0, ge=1.0)
 
     model_config = SettingsConfigDict(

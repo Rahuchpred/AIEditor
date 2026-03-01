@@ -8,6 +8,7 @@ from app.providers import (
     HttpElevenLabsTranscriptionProvider,
     LLMProviderError,
     LLMTimeoutError,
+    MistralReelScriptProvider,
     MistralLLMProvider,
     TranscriptionProviderError,
 )
@@ -190,3 +191,53 @@ def test_voice_cloning_provider_prefers_dedicated_voice_key():
 
     voice_provider = ElevenLabsVoiceCloningProvider(settings)
     assert voice_provider._api_key == "voice-key"
+
+
+def test_mistral_reel_script_logs_prompt_experiment(monkeypatch):
+    provider = MistralReelScriptProvider(
+        Settings(
+            database_url="sqlite+pysqlite:///./providers-test.db",
+            task_execution_mode="inline",
+            storage_backend="local",
+            local_storage_path=".local-storage",
+            mistral_api_key="test-mistral-key",
+            wandb_project="aiedit-prompt-evals",
+            wandb_log_reel_prompts=True,
+        )
+    )
+    provider._client = FakeHttpClient(
+        [
+            _json_response(
+                200,
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": '{"hook":"Hook","body":["Beat 1"],"cta":"CTA","full_narration":"Hook Beat 1 CTA","hashtags":["#test"]}'
+                            }
+                        }
+                    ]
+                },
+            ),
+        ]
+    )
+
+    logged = {}
+
+    def fake_log(settings, rough_idea, clip_count, prompt, *, result=None, error=None):
+        logged["rough_idea"] = rough_idea
+        logged["clip_count"] = clip_count
+        logged["prompt"] = prompt
+        logged["result"] = result
+        logged["error"] = error
+
+    monkeypatch.setattr("app.providers.log_reel_prompt_experiment", fake_log)
+
+    result = provider.generate_reel_script("weekend trip recap", 1)
+
+    assert result.hook == "Hook"
+    assert logged["rough_idea"] == "weekend trip recap"
+    assert logged["clip_count"] == 1
+    assert "weekend trip recap" in logged["prompt"]
+    assert logged["result"] is not None
+    assert logged["error"] is None
