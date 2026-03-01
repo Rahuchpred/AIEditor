@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import moviepy
 
 from app.media import FfmpegMediaProcessor
-from app.schemas import VideoGeometry
+from app.schemas import CaptionCue, CaptionRenderOptions
 
 
 def _capture_concat_command(monkeypatch, durations_by_path: dict[Path, float]):
@@ -20,7 +20,6 @@ def _capture_concat_command(monkeypatch, durations_by_path: dict[Path, float]):
         "_probe_duration",
         lambda path: durations_by_path[Path(path)],
     )
-    monkeypatch.setattr(processor, "_rotation_filter_steps", lambda path: [])
 
     def fake_run(command, capture_output, text, check):
         captured["command"] = command
@@ -54,6 +53,22 @@ def test_concat_clips_uses_video_only_graph(monkeypatch, tmp_path):
     assert command[command.index("-map") + 1] == "[outv]"
     assert command[command.index("-map", command.index("-map") + 1) + 1] == "3:a"
     assert "-shortest" in command
+
+
+def test_concat_clips_can_skip_rotation_reapplication(monkeypatch, tmp_path):
+    clip_paths = [tmp_path / "clip-0.mp4"]
+    audio_path = tmp_path / "voiceover.mp3"
+    output_path = tmp_path / "out.mp4"
+    durations = {clip_paths[0]: 5.0, audio_path: 4.0}
+    processor, captured = _capture_concat_command(monkeypatch, durations)
+
+    monkeypatch.setattr(processor, "_rotation_filter_steps", lambda path: ["transpose=clock", "transpose=clock"])
+
+    processor.concat_clips_with_audio(clip_paths, audio_path, output_path, apply_rotation=False)
+
+    command = captured["command"]
+    filter_graph = command[command.index("-filter_complex") + 1]
+    assert "transpose=" not in filter_graph
 
 
 def test_concat_clips_repeats_inputs_until_audio_is_covered(monkeypatch, tmp_path):
@@ -105,94 +120,10 @@ def test_concat_clips_rejects_when_no_clips_have_usable_duration(monkeypatch, tm
         processor.concat_clips_with_audio(clip_paths, audio_path, output_path)
 
 
-def test_probe_video_geometry_parses_rotation(monkeypatch, tmp_path):
+def test_trim_keep_ranges_applies_rotation_and_clears_rotate_metadata(monkeypatch, tmp_path):
     processor = FfmpegMediaProcessor()
-    video_path = tmp_path / "clip.mov"
-
-    monkeypatch.setattr(
-        "app.media.shutil.which",
-        lambda name: "/usr/bin/ffprobe" if name == "ffprobe" else None,
-    )
-
-    payload = {
-        "streams": [
-            {
-                "width": 1920,
-                "height": 1080,
-                "tags": {"rotate": "90"},
-                "side_data_list": [{"rotation": -90}],
-            }
-        ]
-    }
-
-    def fake_run(command, capture_output, text, check):
-        return SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr="")
-
-    monkeypatch.setattr("app.media.subprocess.run", fake_run)
-
-    geometry = processor._probe_video_geometry(video_path)
-
-    assert geometry is not None
-    assert geometry.rotation_degrees == 270
-    assert geometry.display_width == 1080
-    assert geometry.display_height == 1920
-    assert geometry.is_portrait_display is True
-
-
-def test_rotation_filter_steps_match_rotation(monkeypatch):
-    processor = FfmpegMediaProcessor()
-    dummy_path = Path("/tmp/video.mp4")
-
-    monkeypatch.setattr(
-        processor,
-        "_probe_video_geometry",
-        lambda path: VideoGeometry(
-            encoded_width=1920,
-            encoded_height=1080,
-            rotation_degrees=90,
-            display_width=1080,
-            display_height=1920,
-            is_portrait_display=True,
-        ),
-    )
-    assert processor._rotation_filter_steps(dummy_path) == ["transpose=clock"]
-
-    monkeypatch.setattr(
-        processor,
-        "_probe_video_geometry",
-        lambda path: VideoGeometry(
-            encoded_width=1920,
-            encoded_height=1080,
-            rotation_degrees=180,
-            display_width=1920,
-            display_height=1080,
-            is_portrait_display=False,
-        ),
-    )
-    assert processor._rotation_filter_steps(dummy_path) == ["transpose=clock", "transpose=clock"]
-
-    monkeypatch.setattr(
-        processor,
-        "_probe_video_geometry",
-        lambda path: VideoGeometry(
-            encoded_width=1920,
-            encoded_height=1080,
-            rotation_degrees=270,
-            display_width=1080,
-            display_height=1920,
-            is_portrait_display=True,
-        ),
-    )
-    assert processor._rotation_filter_steps(dummy_path) == ["transpose=cclock"]
-
-    monkeypatch.setattr(processor, "_probe_video_geometry", lambda path: None)
-    assert processor._rotation_filter_steps(dummy_path) == []
-
-
-def test_trim_keep_ranges_applies_rotation_filters(monkeypatch, tmp_path):
-    processor = FfmpegMediaProcessor()
-    input_path = tmp_path / "input.mp4"
-    output_path = tmp_path / "output.mp4"
+    input_path = tmp_path / "clip.mp4"
+    output_path = tmp_path / "out.mp4"
     captured: dict[str, list[str]] = {}
 
     monkeypatch.setattr("app.media._resolve_ffmpeg_binary", lambda: "ffmpeg")
@@ -204,49 +135,81 @@ def test_trim_keep_ranges_applies_rotation_filters(monkeypatch, tmp_path):
 
     monkeypatch.setattr("app.media.subprocess.run", fake_run)
 
-    processor.trim_keep_ranges(input_path, output_path, [(0.0, 1.0)])
+    processor.trim_keep_ranges(input_path, output_path, [(0.0, 1.0), (1.5, 2.0)])
 
     command = captured["command"]
     filter_graph = command[command.index("-filter_complex") + 1]
-    assert "setpts=PTS-STARTPTS,transpose=clock" in filter_graph
+    assert "transpose=clock" in filter_graph
     assert "-metadata:s:v:0" in command
-    assert "rotate=0" in command
+    assert command[command.index("-metadata:s:v:0") + 1] == "rotate=0"
 
 
-def test_auto_cut_clip_applies_rotation_filters(monkeypatch, tmp_path):
+def test_burn_captions_moviepy_falls_back_when_named_font_fails(monkeypatch, tmp_path):
     processor = FfmpegMediaProcessor()
-    input_path = tmp_path / "input.mp4"
-    output_path = tmp_path / "output.mp4"
-    captured: dict[str, list[str]] = {}
-
-    monkeypatch.setattr("app.media._resolve_ffmpeg_binary", lambda: "ffmpeg")
-    monkeypatch.setattr(processor, "_probe_duration", lambda path: 5.0)
-    monkeypatch.setattr(processor, "_rotation_filter_steps", lambda path: ["transpose=cclock"])
-
-    def fake_run(command, capture_output, text, check):
-        captured["command"] = command
-        return SimpleNamespace(returncode=0, stderr="")
-
-    monkeypatch.setattr("app.media.subprocess.run", fake_run)
-
-    processor.auto_cut_clip(input_path, output_path)
-
-    command = captured["command"]
-    assert command[command.index("-vf") + 1] == "transpose=cclock"
-    assert "-metadata:s:v:0" in command
-    assert "rotate=0" in command
-
-
-def test_concat_clips_applies_rotation_before_scaling(monkeypatch, tmp_path):
-    clip_path = tmp_path / "clip-a.mp4"
-    audio_path = tmp_path / "voiceover.mp3"
+    input_path = tmp_path / "in.mp4"
     output_path = tmp_path / "out.mp4"
-    durations = {clip_path: 3.0, audio_path: 2.0}
-    processor, captured = _capture_concat_command(monkeypatch, durations)
-    monkeypatch.setattr(processor, "_rotation_filter_steps", lambda path: ["transpose=clock"])
+    input_path.write_bytes(b"video")
 
-    processor.concat_clips_with_audio([clip_path], audio_path, output_path)
+    calls: list[str | None] = []
 
-    filter_graph = captured["command"][captured["command"].index("-filter_complex") + 1]
-    assert "transpose=clock,scale=1080:1920" in filter_graph
-    assert "-metadata:s:v:0" in captured["command"]
+    class FakeVideoFileClip:
+        def __init__(self, _path):
+            self.size = (360, 640)
+
+        def close(self):
+            pass
+
+    class FakeTextClip:
+        def __init__(self, **kwargs):
+            calls.append(kwargs.get("font"))
+            if kwargs.get("font") == "BrokenFont":
+                raise OSError("font not found")
+            self.size = (200, 40)
+
+        def with_position(self, _value):
+            return self
+
+        def with_start(self, _value):
+            return self
+
+        def with_duration(self, _value):
+            return self
+
+        def close(self):
+            pass
+
+    class FakeCompositeVideoClip:
+        def __init__(self, clips):
+            self.clips = clips
+
+        def write_videofile(self, path, **kwargs):
+            Path(path).write_bytes(b"rendered")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(moviepy, "VideoFileClip", FakeVideoFileClip)
+    monkeypatch.setattr(moviepy, "TextClip", FakeTextClip)
+    monkeypatch.setattr(moviepy, "CompositeVideoClip", FakeCompositeVideoClip)
+
+    processor.burn_captions_moviepy(
+        input_path,
+        output_path,
+        [CaptionCue(start_ms=0, end_ms=1000, text="Hello world")],
+        CaptionRenderOptions(
+            font_path="",
+            font_name="BrokenFont",
+            font_size=36,
+            primary_color="&H00FFFFFF",
+            outline_color="&H00000000",
+            outline_width=3,
+            bottom_margin=80,
+            max_chars_per_line=18,
+            max_lines=2,
+            play_res_x=360,
+            play_res_y=640,
+        ),
+    )
+
+    assert output_path.read_bytes() == b"rendered"
+    assert calls == ["BrokenFont", None]

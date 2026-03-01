@@ -12,7 +12,7 @@ from app.captions import write_ass_subtitles
 from app.constants import SUPPORTED_MEDIA_TYPES
 from app.errors import ServiceError
 from app.constants import ErrorCode
-from app.schemas import CaptionCue, CaptionRenderOptions, MediaInfo, VideoGeometry
+from app.schemas import CaptionCue, CaptionRenderOptions, MediaInfo
 
 
 class MediaProcessor(Protocol):
@@ -63,7 +63,7 @@ class FfmpegMediaProcessor:
         if completed.returncode != 0:
             raise RuntimeError(completed.stderr.strip() or "ffmpeg failed to normalize media")
 
-    def probe_video_geometry(self, file_path: Path) -> VideoGeometry | None:
+    def probe_video_geometry(self, file_path: Path):
         return self._probe_video_geometry(file_path)
 
     def detect_silence(
@@ -111,7 +111,7 @@ class FfmpegMediaProcessor:
         filter_complex = "".join(filter_parts) + f"{concat_inputs}concat=n={n}:v=1:a=1[outv][outa]"
 
         command = [
-            ffmpeg, "-y", "-i", str(input_path),
+            ffmpeg, "-y", "-noautorotate", "-i", str(input_path),
             "-filter_complex", filter_complex,
             "-map", "[outv]", "-map", "[outa]",
             "-c:v", "libx264", "-preset", "fast", "-crf", "23",
@@ -143,7 +143,7 @@ class FfmpegMediaProcessor:
             start = max(0.0, (duration - target_duration) / 2)
             end = min(duration, start + target_duration)
 
-        command = [ffmpeg, "-y", "-i", str(input_path), "-ss", str(start), "-t", str(end - start)]
+        command = [ffmpeg, "-y", "-noautorotate", "-i", str(input_path), "-ss", str(start), "-t", str(end - start)]
         rotation_steps = self._rotation_filter_steps(input_path)
         if rotation_steps:
             command.extend(["-vf", ",".join(rotation_steps)])
@@ -167,6 +167,8 @@ class FfmpegMediaProcessor:
         output_path: Path,
         width: int = 1080,
         height: int = 1920,
+        *,
+        apply_rotation: bool = True,
     ) -> None:
         """Concatenate B-roll clips (scaled to width x height) and overlay voiceover audio."""
         ffmpeg = _resolve_ffmpeg_binary()
@@ -181,8 +183,9 @@ class FfmpegMediaProcessor:
         filter_parts: list[str] = []
         concat_inputs = ""
         for i, path in enumerate(expanded_clip_paths):
+            rotation_steps = self._rotation_filter_steps(path) if apply_rotation else []
             normalize_steps = [
-                *self._rotation_filter_steps(path),
+                *rotation_steps,
                 f"scale={width}:{height}:force_original_aspect_ratio=decrease",
                 f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2",
                 "fps=30",
@@ -195,10 +198,10 @@ class FfmpegMediaProcessor:
 
         filter_complex = "".join(filter_parts) + f"{concat_inputs}concat=n={n}:v=1:a=0[outv]"
 
-        inputs = [str(p) for p in expanded_clip_paths] + [str(audio_path)]
         flat_inputs: list[str] = []
-        for inp in inputs:
-            flat_inputs.extend(["-i", inp])
+        for clip_path in expanded_clip_paths:
+            flat_inputs.extend(["-noautorotate", "-i", str(clip_path)])
+        flat_inputs.extend(["-i", str(audio_path)])
 
         audio_input_index = n
         command = [
@@ -230,6 +233,8 @@ class FfmpegMediaProcessor:
         subtitle_path: Path,
         output_path: Path,
         options: CaptionRenderOptions,
+        *,
+        apply_rotation: bool = False,
     ) -> None:
         ffmpeg = _resolve_ffmpeg_binary()
         if ffmpeg is None:
@@ -238,7 +243,13 @@ class FfmpegMediaProcessor:
             raise RuntimeError("ffmpeg subtitle rendering is unavailable (libass/subtitles filter missing)")
 
         subtitle_arg = _escape_filter_path(subtitle_path)
-        filter_steps = [*self._rotation_filter_steps(input_video_path)]
+        # By default, subtitle burn assumes the video was already re-encoded upright
+        # earlier in the pipeline.  When apply_rotation is True (e.g. the editor-render
+        # path where the stored preview may still carry rotation metadata), we prepend
+        # rotation filters so the subtitle coordinate system matches the upright frame.
+        filter_steps: list[str] = []
+        if apply_rotation:
+            filter_steps.extend(self._rotation_filter_steps(input_video_path))
         subtitle_filter = f"subtitles='{subtitle_arg}'"
         if options.font_path:
             fonts_dir = Path(options.font_path).expanduser().resolve().parent
@@ -248,6 +259,7 @@ class FfmpegMediaProcessor:
         command = [
             ffmpeg,
             "-y",
+            "-noautorotate",
             "-i",
             str(input_video_path),
             "-vf",
@@ -269,6 +281,150 @@ class FfmpegMediaProcessor:
         completed = subprocess.run(command, capture_output=True, text=True, check=False)
         if completed.returncode != 0:
             raise RuntimeError(completed.stderr.strip() or "ffmpeg subtitle burn failed")
+
+    def render_caption_overlay_video(
+        self,
+        subtitle_path: Path,
+        output_path: Path,
+        duration_seconds: float,
+        options: CaptionRenderOptions,
+        *,
+        fps: int = 30,
+    ) -> None:
+        ffmpeg = _resolve_ffmpeg_binary()
+        if ffmpeg is None:
+            raise RuntimeError("ffmpeg is required for caption overlay rendering")
+        if not self._supports_libass(ffmpeg):
+            raise RuntimeError("ffmpeg caption overlay rendering is unavailable (libass/subtitles filter missing)")
+
+        safe_duration = max(0.1, float(duration_seconds))
+        subtitle_arg = _escape_filter_path(subtitle_path)
+        subtitle_filter = f"subtitles='{subtitle_arg}'"
+        if options.font_path:
+            fonts_dir = Path(options.font_path).expanduser().resolve().parent
+            subtitle_filter += f":fontsdir='{_escape_filter_path(fonts_dir)}'"
+
+        canvas = (
+            f"color=color=black@0.0:size={options.play_res_x}x{options.play_res_y}:"
+            f"rate={fps}:duration={safe_duration}"
+        )
+        command = [
+            ffmpeg,
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            canvas,
+            "-vf",
+            f"format=rgba,{subtitle_filter}",
+            "-an",
+            "-c:v",
+            "qtrle",
+            "-pix_fmt",
+            "argb",
+            str(output_path),
+        ]
+        completed = subprocess.run(command, capture_output=True, text=True, check=False)
+        if completed.returncode != 0:
+            raise RuntimeError(completed.stderr.strip() or "ffmpeg caption overlay render failed")
+
+    def burn_captions_moviepy(
+        self,
+        input_video_path: Path,
+        output_path: Path,
+        cues: list[CaptionCue],
+        options: CaptionRenderOptions,
+    ) -> None:
+        """Burn captions into video using MoviePy/Pillow text rendering."""
+        from moviepy import CompositeVideoClip, TextClip, VideoFileClip
+
+        video = VideoFileClip(str(input_video_path))
+        final = None
+        text_clips = []
+        try:
+            video_w, video_h = video.size
+
+            font_color = _ass_color_to_hex(options.primary_color)
+            outline_color = _ass_color_to_hex(options.outline_color)
+
+            # Use a concrete font file when configured, otherwise try the named font first
+            # and fall back to MoviePy's default Pillow font if that lookup fails.
+            preferred_font = options.font_path or (options.font_name or None)
+
+            # Scale from PlayRes coordinate space to actual video pixels.
+            scale_y = video_h / max(options.play_res_y, 1)
+            scale_x = video_w / max(options.play_res_x, 1)
+            pixel_font_size = max(16, round(options.font_size * scale_y))
+            pixel_bottom_margin = max(12, round(options.bottom_margin * scale_y))
+            text_max_width = max(100, video_w - round((options.margin_left + options.margin_right) * scale_x))
+            stroke_width = max(1, round(options.outline_width * scale_y))
+
+            def _build_text_clip(display_text: str):
+                common_kwargs = {
+                    "text": display_text,
+                    "font_size": pixel_font_size,
+                    "color": font_color,
+                    "stroke_color": outline_color,
+                    "stroke_width": stroke_width,
+                    "method": "caption",
+                    "size": (text_max_width, None),
+                    "text_align": "center",
+                    "horizontal_align": "center",
+                }
+                if preferred_font:
+                    try:
+                        return TextClip(font=preferred_font, **common_kwargs)
+                    except Exception:
+                        # Fall back to the default font instead of failing the whole render.
+                        pass
+                return TextClip(**common_kwargs)
+
+            for cue in cues:
+                text = cue.text.strip()
+                if not text:
+                    continue
+
+                start_s = cue.start_ms / 1000.0
+                end_s = cue.end_ms / 1000.0
+                duration = max(0.05, end_s - start_s)
+
+                display_text = text.replace("\\N", "\n").replace("\\n", "\n")
+                txt_clip = _build_text_clip(display_text)
+
+                y_pos = video_h - pixel_bottom_margin - txt_clip.size[1]
+                txt_clip = (
+                    txt_clip
+                    .with_position(("center", y_pos))
+                    .with_start(start_s)
+                    .with_duration(duration)
+                )
+                text_clips.append(txt_clip)
+
+            if not text_clips:
+                import shutil
+
+                shutil.copyfile(input_video_path, output_path)
+                return
+
+            final = CompositeVideoClip([video, *text_clips])
+            final.write_videofile(
+                str(output_path),
+                codec="libx264",
+                preset="fast",
+                audio_codec="aac",
+                audio_bitrate="128k",
+                logger=None,
+            )
+        except Exception as exc:
+            raise RuntimeError(f"MoviePy caption render failed: {exc}") from exc
+        finally:
+            for text_clip in text_clips:
+                close = getattr(text_clip, "close", None)
+                if callable(close):
+                    close()
+            if final is not None:
+                final.close()
+            video.close()
 
     def _expand_clips_to_cover_audio(self, clip_paths: list[Path], audio_path: Path) -> list[Path]:
         audio_duration = self._probe_duration(audio_path)
@@ -331,11 +487,20 @@ class FfmpegMediaProcessor:
 
         raise RuntimeError("Unable to determine media duration; install ffprobe or upload WAV audio")
 
-    def _probe_video_geometry(self, file_path: Path) -> VideoGeometry | None:
+    def _probe_video_geometry(self, file_path: Path):
         ffprobe = shutil.which("ffprobe")
-        if ffprobe is None:
-            return None
+        if ffprobe is not None:
+            result = self._probe_geometry_ffprobe(file_path, ffprobe)
+            if result is not None:
+                return result
+        # Fall back to parsing ffmpeg -i stderr when ffprobe is unavailable.
+        ffmpeg = _resolve_ffmpeg_binary()
+        if ffmpeg is not None:
+            return self._probe_geometry_ffmpeg(file_path, ffmpeg)
+        return None
 
+    @staticmethod
+    def _probe_geometry_ffprobe(file_path: Path, ffprobe: str):
         command = [
             ffprobe,
             "-v",
@@ -352,7 +517,7 @@ class FfmpegMediaProcessor:
             return None
 
         try:
-            payload = json.loads(completed.stdout or "{}")
+            payload = json.loads(getattr(completed, "stdout", "") or "{}")
         except json.JSONDecodeError:
             return None
 
@@ -373,36 +538,75 @@ class FfmpegMediaProcessor:
         for side_data in stream.get("side_data_list") or []:
             normalized_rotation = _normalize_rotation_degrees(side_data.get("rotation"))
             if normalized_rotation is not None:
-                rotation_degrees = normalized_rotation
+                # displaymatrix rotation is the negative of the rotate tag convention;
+                # negate it so downstream transpose mapping stays consistent.
+                rotation_degrees = (360 - normalized_rotation) % 360
                 break
         if rotation_degrees == 0:
             rotation_degrees = _normalize_rotation_degrees((stream.get("tags") or {}).get("rotate")) or 0
 
-        if rotation_degrees in (90, 270):
-            display_width = encoded_height
-            display_height = encoded_width
-        else:
-            display_width = encoded_width
-            display_height = encoded_height
+        display_width = encoded_height if rotation_degrees in (90, 270) else encoded_width
+        display_height = encoded_width if rotation_degrees in (90, 270) else encoded_height
 
-        return VideoGeometry(
-            encoded_width=encoded_width,
-            encoded_height=encoded_height,
-            rotation_degrees=rotation_degrees,
-            display_width=display_width,
-            display_height=display_height,
-            is_portrait_display=display_height > display_width,
-        )
+        return {
+            "encoded_width": encoded_width,
+            "encoded_height": encoded_height,
+            "rotation_degrees": rotation_degrees,
+            "display_width": display_width,
+            "display_height": display_height,
+            "is_portrait_display": display_height > display_width,
+        }
+
+    @staticmethod
+    def _probe_geometry_ffmpeg(file_path: Path, ffmpeg: str):
+        """Parse video geometry from ``ffmpeg -i`` stderr output."""
+        command = [ffmpeg, "-i", str(file_path)]
+        completed = subprocess.run(command, capture_output=True, text=True, check=False)
+        stderr = completed.stderr or ""
+
+        # Extract dimensions from "Video: ... 1920x1080" stream line.
+        dim_match = re.search(r"Video:.*?\b(\d{2,5})x(\d{2,5})\b", stderr)
+        if not dim_match:
+            return None
+        encoded_width = int(dim_match.group(1))
+        encoded_height = int(dim_match.group(2))
+
+        rotation_degrees = 0
+        # Check displaymatrix rotation (e.g. "rotation of -90.00 degrees").
+        # Negate because displaymatrix convention is opposite to the rotate tag.
+        dm_match = re.search(r"displaymatrix:.*?rotation of\s+([-\d.]+)\s+degrees", stderr)
+        if dm_match:
+            raw = _normalize_rotation_degrees(dm_match.group(1)) or 0
+            rotation_degrees = (360 - raw) % 360
+        # Fall back to rotate tag in metadata.
+        if rotation_degrees == 0:
+            tag_match = re.search(r"rotate\s*:\s*([-\d]+)", stderr)
+            if tag_match:
+                rotation_degrees = _normalize_rotation_degrees(tag_match.group(1)) or 0
+
+        display_width = encoded_height if rotation_degrees in (90, 270) else encoded_width
+        display_height = encoded_width if rotation_degrees in (90, 270) else encoded_height
+
+        return {
+            "encoded_width": encoded_width,
+            "encoded_height": encoded_height,
+            "rotation_degrees": rotation_degrees,
+            "display_width": display_width,
+            "display_height": display_height,
+            "is_portrait_display": display_height > display_width,
+        }
 
     def _rotation_filter_steps(self, file_path: Path) -> list[str]:
         geometry = self._probe_video_geometry(file_path)
         if geometry is None:
             return []
-        if geometry.rotation_degrees == 90:
+
+        rotation_degrees = int(geometry.get("rotation_degrees", 0))
+        if rotation_degrees == 90:
             return ["transpose=clock"]
-        if geometry.rotation_degrees == 180:
+        if rotation_degrees == 180:
             return ["transpose=clock", "transpose=clock"]
-        if geometry.rotation_degrees == 270:
+        if rotation_degrees == 270:
             return ["transpose=cclock"]
         return []
 
@@ -462,3 +666,15 @@ def _resolve_ffmpeg_binary() -> str | None:
 def _escape_filter_path(path: Path) -> str:
     raw = str(path)
     return raw.replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
+
+
+def _ass_color_to_hex(ass_color: str) -> str:
+    """Convert ASS colour ``&HAABBGGRR`` to ``#RRGGBB`` for Pillow."""
+    raw = ass_color.strip().lstrip("&").lstrip("H").lstrip("h")
+    if len(raw) == 8:
+        # AABBGGRR → RRGGBB
+        return f"#{raw[6:8]}{raw[4:6]}{raw[2:4]}"
+    if len(raw) == 6:
+        # BBGGRR → RRGGBB
+        return f"#{raw[4:6]}{raw[2:4]}{raw[0:2]}"
+    return ass_color
