@@ -96,9 +96,34 @@ class VoiceProfile(BaseModel):
     name: str
 
 
+class HookTemplate(BaseModel):
+    id: str
+    hook_text: str
+    source_url: str | None = None
+    page_number: int
+    section: str | None = None
+
+
+class HookSuggestion(BaseModel):
+    id: str
+    hook_text: str
+    reason: str
+    section: str | None = None
+    source_url: str | None = None
+
+
+class HookSuggestionRequest(BaseModel):
+    rough_idea: str
+    limit: int = 4
+
+
+class HookSuggestionResponse(BaseModel):
+    suggestions: list[HookSuggestion]
+
+
 class ReelScriptRequest(BaseModel):
     """Request to generate a reel script."""
 
     rough_idea: str
+    selected_hook_id: str
     clip_count: int = 5
-

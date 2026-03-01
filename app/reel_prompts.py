@@ -2,11 +2,73 @@
 
 from __future__ import annotations
 
+import json
 
-def build_reel_script_prompt(rough_idea: str, clip_count: int) -> str:
+from app.schemas import HookTemplate
+
+
+def build_hook_suggestion_prompt(rough_idea: str, candidates: list[HookTemplate], limit: int) -> str:
+    """Build the Mistral prompt for selecting the best hook options."""
+    candidates_json = json.dumps(
+        [
+            {
+                "id": candidate.id,
+                "hook_text": candidate.hook_text,
+                "section": candidate.section,
+            }
+            for candidate in candidates
+        ],
+        ensure_ascii=True,
+    )
+    return f"""You are selecting the best existing hook templates for a short-form Instagram Reel.
+
+Do not write new hooks. Choose only from the provided candidates.
+
+**User's rough idea/topic:**
+{rough_idea}
+
+**Candidate hooks (JSON array):**
+{candidates_json}
+
+Select exactly {limit} hooks that best match the user's idea.
+
+**Selection criteria:**
+- Strong semantic fit with the user's idea
+- High first-3-seconds attention potential
+- Diverse options, not near-duplicates
+- Easy to build a strong reel around
+
+Return valid JSON only with this exact structure:
+{{
+  "suggestions": [
+    {{
+      "id": "<candidate id>",
+      "reason": "<one short sentence explaining the fit>"
+    }}
+  ]
+}}
+
+**Rules:**
+- Return exactly {limit} suggestions when enough candidates are provided
+- Use only candidate IDs from the provided JSON
+- Do not rewrite hook text
+- No markdown, no code fences, no extra text
+"""
+
+
+def build_reel_script_prompt(
+    rough_idea: str,
+    selected_hook_text: str,
+    clip_count: int,
+    selected_hook_section: str | None = None,
+) -> str:
     """Build the Mistral prompt for generating a viral reel script."""
+    section_line = f"\n**Selected hook section/category:** {selected_hook_section}\n" if selected_hook_section else "\n"
     return f"""You are an expert Instagram Reels content strategist. Create a viral-style script for an Instagram Reel.
 
+**Selected hook chosen by the user:**
+{selected_hook_text}
+{section_line}
 **User's rough idea/topic:**
 {rough_idea}
 
@@ -14,7 +76,7 @@ def build_reel_script_prompt(rough_idea: str, clip_count: int) -> str:
 Each clip will be auto-cut to 5-7 seconds. Write exactly {clip_count} body segments so each segment matches one clip.
 
 **Script structure for viral Reels:**
-1. **Hook** (1-2 sentences): Grab attention in the first 3 seconds. Use a bold claim, question, or surprising statement. No fluff.
+1. **Hook** (1-2 sentences): Use the selected hook as the opening angle. You may tighten the wording, but keep the same core strategy and intent.
 2. **Body** (list of {clip_count} segments): Each segment is 1-2 sentences, ~5-7 seconds when spoken. Deliver value, tips, or story beats. Match pacing to B-roll.
 3. **CTA** (1-2 sentences): Clear call-to-action. Save, follow, comment, or share.
 4. **Hashtags**: 5-8 relevant, high-engagement hashtags for discoverability.
@@ -23,6 +85,7 @@ Each clip will be auto-cut to 5-7 seconds. Write exactly {clip_count} body segme
 - Write in a conversational, energetic tone
 - Keep sentences short and punchy
 - No filler words (um, uh, like)
+- Build the script around the selected hook and the user's rough idea
 - full_narration must be the exact concatenated script for text-to-speech (hook + body segments + cta, no hashtags)
 - Return valid JSON only, no markdown or extra text
 
