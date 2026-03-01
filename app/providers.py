@@ -75,7 +75,7 @@ class HttpElevenLabsTranscriptionProvider:
                     self._settings.elevenlabs_api_url,
                     headers={"xi-api-key": self._settings.elevenlabs_api_key},
                     data=payload,
-                    files={"file": (audio_path.name, audio_handle, "audio/wav")},
+                    files={"file": (audio_path.name, audio_handle, _media_content_type(audio_path.name))},
                 )
         except httpx.TimeoutException as exc:
             raise TranscriptionProviderError("ElevenLabs transcription timed out") from exc
@@ -800,3 +800,20 @@ def _safe_http_error_detail(response: httpx.Response) -> str:
         pass
     text = response.text.strip()
     return (text or "upstream error")[:200]
+
+
+def _media_content_type(filename: str) -> str:
+    lowered = filename.lower()
+    if lowered.endswith(".wav"):
+        return "audio/wav"
+    if lowered.endswith(".mp3") or lowered.endswith(".mpeg"):
+        return "audio/mpeg"
+    if lowered.endswith(".m4a"):
+        return "audio/x-m4a"
+    if lowered.endswith(".mp4"):
+        return "video/mp4"
+    if lowered.endswith(".mov"):
+        return "video/quicktime"
+    if lowered.endswith(".webm"):
+        return "video/webm"
+    return "application/octet-stream"

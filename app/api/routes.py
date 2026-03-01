@@ -8,8 +8,10 @@ from fastapi import APIRouter, File, Form, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from starlette.background import BackgroundTask
 
+from app.captions import default_caption_render_options, remap_cues_after_cuts, segments_to_caption_cues
 from app.container import get_container
 from app.media import FfmpegMediaProcessor
+from app.providers import TranscriptionProviderError
 from app.schemas import AnalysisJobAccepted, AnalysisJobResult, AnalysisJobStatus
 
 router = APIRouter()
@@ -18,6 +20,11 @@ router = APIRouter()
 def _service_from_request(request: Request):
     container = getattr(request.app.state, "container", None) or get_container()
     return container.create_analysis_service()
+
+
+def _transcription_provider_from_request(request: Request):
+    container = getattr(request.app.state, "container", None) or get_container()
+    return container.transcription_provider
 
 
 @router.get("/healthz")
@@ -328,7 +335,7 @@ def ui_playground() -> str:
       </div>
       <div class="preview-controls">
         <button id="playPauseBtn" type="button">Play</button>
-        <button id="autoCutBtn" class="ghost" type="button" disabled>Auto Cut</button>
+        <button id="autoCutBtn" class="ghost" type="button" disabled>Auto Cut + Captions</button>
         <span id="timeDisplay" class="preview-time">0:00 / 0:00</span>
       </div>
       <div id="tlContainer" class="tl-container">
@@ -621,6 +628,9 @@ def ui_playground() -> str:
         const fd = new FormData();
         fd.append("media_file", file);
         fd.append("cut_regions", JSON.stringify(detectedCutRegions));
+        const jobId = jobInput.value.trim();
+        if (jobId) fd.append("job_id", jobId);
+        fd.append("captions_enabled", "true");
         const resp = await fetch("/v1/auto-cut", { method: "POST", body: fd });
         if (!resp.ok) {
           const err = await resp.json();
@@ -641,7 +651,7 @@ def ui_playground() -> str:
       } catch (err) {
         showTranscript("Auto-cut error: " + (err.message || "Network request failed"));
       } finally {
-        autoCutBtn.textContent = "Auto Cut";
+        autoCutBtn.textContent = "Auto Cut + Captions";
         autoCutBtn.disabled = !detectedCutRegions.length;
       }
     });
@@ -855,13 +865,27 @@ async def detect_silence(
 
 @router.post("/v1/auto-cut")
 async def auto_cut(
+    request: Request,
     media_file: UploadFile = File(...),
     cut_regions: str = Form(...),
-) -> FileResponse:
+    job_id: str | None = Form(default=None),
+    captions_enabled: bool = Form(default=True),
+):
     suffix = Path(media_file.filename or "upload").suffix or ".mp4"
+    content_type = media_file.content_type or ""
+    if captions_enabled and not content_type.startswith("video/"):
+        return JSONResponse(
+            {"error": "Captioned final video is only supported for video uploads"},
+            status_code=400,
+        )
+
     input_tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
     output_tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
     output_tmp.close()
+    subtitle_tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".ass")
+    subtitle_tmp.close()
+    captioned_tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+    captioned_tmp.close()
     try:
         input_tmp.write(await media_file.read())
         input_tmp.close()
@@ -887,15 +911,64 @@ async def auto_cut(
             Path(input_tmp.name), Path(output_tmp.name), keep_ranges
         )
 
-        cleanup = BackgroundTask(lambda: Path(output_tmp.name).unlink(missing_ok=True))
+        final_output_path = Path(output_tmp.name)
+        if captions_enabled:
+            service = _service_from_request(request)
+            cues = []
+            if job_id:
+                try:
+                    result = service.get_result(job_id)
+                    cues = remap_cues_after_cuts(
+                        segments_to_caption_cues(result.transcript.segments),
+                        cuts,
+                    )
+                except Exception:
+                    cues = []
+
+            if not cues:
+                try:
+                    transcription = _transcription_provider_from_request(request).transcribe(
+                        Path(output_tmp.name),
+                        None,
+                    )
+                except (TranscriptionProviderError, RuntimeError) as exc:
+                    raise RuntimeError(f"Caption transcription failed: {exc}") from exc
+                cues = segments_to_caption_cues(transcription.segments)
+
+            if not cues:
+                raise RuntimeError("No usable caption cues were produced")
+
+            render_options = default_caption_render_options(
+                font_path=service._settings.caption_font_path,
+                font_name=service._settings.caption_font_name,
+                font_size=34,
+                bottom_margin=48,
+                max_chars_per_line=36,
+            )
+            _media_proc.write_ass_subtitles(cues, Path(subtitle_tmp.name), render_options)
+            _media_proc.burn_subtitles_into_video(
+                Path(output_tmp.name),
+                Path(subtitle_tmp.name),
+                Path(captioned_tmp.name),
+                render_options,
+            )
+            final_output_path = Path(captioned_tmp.name)
+
+        def _cleanup() -> None:
+            Path(output_tmp.name).unlink(missing_ok=True)
+            Path(subtitle_tmp.name).unlink(missing_ok=True)
+            Path(captioned_tmp.name).unlink(missing_ok=True)
+
         return FileResponse(
-            output_tmp.name,
+            str(final_output_path),
             media_type="video/mp4",
             filename="autocut.mp4",
-            background=cleanup,
+            background=BackgroundTask(_cleanup),
         )
     except (RuntimeError, json.JSONDecodeError, KeyError) as exc:
         Path(output_tmp.name).unlink(missing_ok=True)
+        Path(subtitle_tmp.name).unlink(missing_ok=True)
+        Path(captioned_tmp.name).unlink(missing_ok=True)
         return JSONResponse({"error": str(exc)}, status_code=400)
     finally:
         Path(input_tmp.name).unlink(missing_ok=True)
