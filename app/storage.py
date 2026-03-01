@@ -19,6 +19,9 @@ class ObjectStorageClient(Protocol):
     def get_bytes(self, key: str) -> bytes:
         ...
 
+    def delete(self, key: str) -> None:
+        ...
+
 
 class LocalObjectStorageClient:
     def __init__(self, base_path: str):
@@ -37,6 +40,9 @@ class LocalObjectStorageClient:
 
     def get_bytes(self, key: str) -> bytes:
         return self._path_for(key).read_bytes()
+
+    def delete(self, key: str) -> None:
+        self._path_for(key).unlink(missing_ok=True)
 
     def _path_for(self, key: str) -> Path:
         return self._base_path / key
@@ -65,6 +71,9 @@ class S3ObjectStorageClient:
     def get_bytes(self, key: str) -> bytes:
         response = self._client.get_object(Bucket=self._bucket, Key=key)
         return response["Body"].read()
+
+    def delete(self, key: str) -> None:
+        self._client.delete_object(Bucket=self._bucket, Key=key)
 
     def _ensure_bucket(self) -> None:
         try:

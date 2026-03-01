@@ -3,10 +3,11 @@ from __future__ import annotations
 import math
 from pathlib import Path
 
-from app.schemas import CaptionCue, CaptionRenderOptions, TimedTextSegment
+from app.schemas import CaptionCue, CaptionRenderOptions, EditableCaptionCue, TimedTextSegment
 
 _MIN_CUE_MS = 600
 _MAX_CUE_MS = 3500
+_MIN_EDITABLE_CUE_MS = 300
 
 
 def default_caption_render_options(
@@ -19,23 +20,29 @@ def default_caption_render_options(
 ) -> CaptionRenderOptions:
     is_portrait = frame_height > frame_width
     if is_portrait:
-        resolved_font_size = font_size if font_size is not None else max(28, round(frame_height * 0.028))
-        margin_left = max(24, round(frame_width * 0.12))
-        margin_right = max(24, round(frame_width * 0.18))
-        bottom_margin = max(80, round(frame_height * 0.24))
-        max_chars_per_line = 22
+        resolved_font_size = font_size if font_size is not None else max(
+            28, round(frame_height * 0.02))
+        alignment = 2
+        margin_left = 24
+        margin_right = 24
+        bottom_margin = max(40, round(frame_height * 0.05))
+        max_chars_per_line = 18
         max_lines = 2
-        soft_wrap_threshold = 18
+        soft_wrap_threshold = 16
         soft_wrap_increment_limit = 4
+        angle = 0
     else:
-        resolved_font_size = font_size if font_size is not None else max(28, round(frame_height * 0.044))
+        resolved_font_size = font_size if font_size is not None else max(
+            28, round(frame_height * 0.04))
+        alignment = 2
         margin_left = 48
         margin_right = 48
-        bottom_margin = max(48, round(frame_height * 0.08))
+        bottom_margin = max(60, round(frame_height * 0.08))
         max_chars_per_line = 32
         max_lines = 2
         soft_wrap_threshold = 26
         soft_wrap_increment_limit = 6
+        angle = 0
 
     return CaptionRenderOptions(
         font_path=font_path,
@@ -44,7 +51,8 @@ def default_caption_render_options(
         primary_color="&H00FFFFFF",
         outline_color="&H00000000",
         outline_width=3,
-        alignment=2,
+        angle=angle,
+        alignment=alignment,
         margin_left=margin_left,
         margin_right=margin_right,
         bottom_margin=bottom_margin,
@@ -52,6 +60,8 @@ def default_caption_render_options(
         max_lines=max_lines,
         soft_wrap_threshold=soft_wrap_threshold,
         soft_wrap_increment_limit=soft_wrap_increment_limit,
+        play_res_x=frame_width,
+        play_res_y=frame_height,
     )
 
 
@@ -74,9 +84,7 @@ def shape_caption_cues(
     cues: list[CaptionCue],
     options: CaptionRenderOptions | None = None,
 ) -> list[CaptionCue]:
-    if options is None:
-        options = default_caption_render_options()
-
+    options = options or default_caption_render_options()
     shaped_cues: list[CaptionCue] = []
     for cue in cues:
         if cue.end_ms <= cue.start_ms:
@@ -94,10 +102,12 @@ def shape_caption_cues(
         cursor = cue.start_ms
 
         for index, chunk in enumerate(chunks):
-            next_cursor = cue.end_ms if index == len(chunks) - 1 else min(cue.end_ms, cursor + step)
+            next_cursor = cue.end_ms if index == len(
+                chunks) - 1 else min(cue.end_ms, cursor + step)
             if next_cursor <= cursor:
                 next_cursor = min(cue.end_ms, cursor + _MIN_CUE_MS)
-            shaped_cues.append(CaptionCue(start_ms=cursor, end_ms=next_cursor, text=chunk))
+            shaped_cues.append(CaptionCue(
+                start_ms=cursor, end_ms=next_cursor, text=chunk))
             cursor = next_cursor
 
     return _normalize_cue_lengths(shaped_cues)
@@ -120,7 +130,8 @@ def remap_cues_after_cuts(cues: list[CaptionCue], cut_regions: list[dict[str, fl
 
     remapped: list[CaptionCue] = []
     for cue in cues:
-        surviving_fragments = _surviving_fragments(cue.start_ms, cue.end_ms, cuts_ms)
+        surviving_fragments = _surviving_fragments(
+            cue.start_ms, cue.end_ms, cuts_ms)
         if not surviving_fragments:
             continue
 
@@ -148,6 +159,29 @@ def remap_cues_after_cuts(cues: list[CaptionCue], cut_regions: list[dict[str, fl
     return _normalize_cue_lengths(remapped)
 
 
+def normalize_edited_cues(cues: list[EditableCaptionCue]) -> list[CaptionCue]:
+    normalized: list[CaptionCue] = []
+    for cue in sorted(cues, key=lambda item: (item.start_ms, item.end_ms, item.id)):
+        start_ms = max(0, int(cue.start_ms))
+        end_ms = int(cue.end_ms)
+        text = str(cue.text or "").strip()
+        if not text:
+            continue
+
+        if end_ms <= start_ms:
+            end_ms = start_ms + _MIN_EDITABLE_CUE_MS
+        elif end_ms - start_ms < _MIN_EDITABLE_CUE_MS:
+            end_ms = start_ms + _MIN_EDITABLE_CUE_MS
+
+        if normalized and start_ms < normalized[-1].end_ms:
+            start_ms = normalized[-1].end_ms
+            end_ms = max(end_ms, start_ms + _MIN_EDITABLE_CUE_MS)
+
+        normalized.append(CaptionCue(start_ms=start_ms, end_ms=end_ms, text=text))
+
+    return normalized
+
+
 def write_ass_subtitles(
     cues: list[CaptionCue],
     output_path: Path,
@@ -159,6 +193,8 @@ def write_ass_subtitles(
         "ScriptType: v4.00+",
         "WrapStyle: 0",
         "ScaledBorderAndShadow: yes",
+        f"PlayResX: {options.play_res_x}",
+        f"PlayResY: {options.play_res_y}",
         "",
         "[V4+ Styles]",
         (
@@ -169,7 +205,7 @@ def write_ass_subtitles(
         (
             "Style: Default,"
             f"{options.font_name},{options.font_size},{options.primary_color},&H000000FF,"
-            f"{options.outline_color},&H64000000,-1,0,0,0,100,100,0,0,1,"
+            f"{options.outline_color},&H64000000,-1,0,0,0,100,100,0,{options.angle},1,"
             f"{options.outline_width},0,{options.alignment},{options.margin_left},{options.margin_right},"
             f"{options.bottom_margin},1"
         ),
@@ -231,16 +267,19 @@ def _normalize_cue_lengths(cues: list[CaptionCue]) -> list[CaptionCue]:
     normalized: list[CaptionCue] = []
     for index, cue in enumerate(cues):
         start_ms = cue.start_ms
-        next_start = cues[index + 1].start_ms if index + 1 < len(cues) else None
+        next_start = cues[index + 1].start_ms if index + \
+            1 < len(cues) else None
         end_ms = cue.end_ms
 
         min_end = start_ms + _MIN_CUE_MS
         if end_ms < min_end:
-            end_ms = min_end if next_start is None else min(min_end, next_start)
+            end_ms = min_end if next_start is None else min(
+                min_end, next_start)
 
         max_end = start_ms + _MAX_CUE_MS
         if end_ms > max_end:
-            end_ms = max_end if next_start is None else min(max_end, next_start)
+            end_ms = max_end if next_start is None else min(
+                max_end, next_start)
 
         if next_start is not None and end_ms > next_start:
             end_ms = next_start
@@ -248,7 +287,8 @@ def _normalize_cue_lengths(cues: list[CaptionCue]) -> list[CaptionCue]:
         if end_ms <= start_ms:
             continue
 
-        normalized.append(CaptionCue(start_ms=start_ms, end_ms=end_ms, text=cue.text))
+        normalized.append(CaptionCue(start_ms=start_ms,
+                          end_ms=end_ms, text=cue.text))
     return normalized
 
 
@@ -306,7 +346,8 @@ def _split_text_across_fragments(
 
     durations = [max(1, end - start) for start, end in fragments]
     total_duration = sum(durations)
-    raw_counts = [max(1, round(len(words) * (duration / total_duration))) for duration in durations]
+    raw_counts = [max(1, round(len(words) * (duration / total_duration)))
+                  for duration in durations]
 
     while sum(raw_counts) > len(words):
         for index in range(len(raw_counts) - 1, -1, -1):

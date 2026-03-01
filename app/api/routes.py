@@ -3,13 +3,15 @@ from __future__ import annotations
 import json
 import tempfile
 from pathlib import Path
+from uuid import uuid4
 
 from fastapi import APIRouter, File, Form, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from starlette.background import BackgroundTask
 
 from app.captions import (
     default_caption_render_options,
+    normalize_edited_cues,
     remap_cues_after_cuts,
     segments_to_caption_cues,
     segments_to_raw_cues,
@@ -18,26 +20,40 @@ from app.captions import (
 from app.container import get_container
 from app.media import FfmpegMediaProcessor
 from app.providers import TranscriptionProviderError
-from app.schemas import AnalysisJobAccepted, AnalysisJobResult, AnalysisJobStatus
+from app.schemas import (
+    AnalysisJobAccepted,
+    AnalysisJobResult,
+    AnalysisJobStatus,
+    AutoCutEditorSessionResponse,
+    CaptionRenderOptions,
+    CaptionTrackSettings,
+    CutRegion,
+    EditableCaptionCue,
+    RenderEditedCaptionsRequest,
+)
 
 router = APIRouter()
 
 
+def _container_from_request(request: Request):
+    return getattr(request.app.state, "container", None) or get_container()
+
+
 def _service_from_request(request: Request):
-    container = getattr(request.app.state, "container", None) or get_container()
+    container = _container_from_request(request)
     return container.create_analysis_service()
 
 
 def _transcription_provider_from_request(request: Request):
-    container = getattr(request.app.state, "container", None) or get_container()
+    container = _container_from_request(request)
     return container.transcription_provider
 
 
 def _caption_options_for_video(media_proc, file_path: Path, *, font_path: str, font_name: str):
     geometry_probe = getattr(media_proc, "probe_video_geometry", None)
     geometry = geometry_probe(file_path) if callable(geometry_probe) else None
-    frame_width = geometry.display_width if geometry is not None else 1920
-    frame_height = geometry.display_height if geometry is not None else 1080
+    frame_width = int(geometry.get("display_width", 1920)) if geometry else 1920
+    frame_height = int(geometry.get("display_height", 1080)) if geometry else 1080
     return default_caption_render_options(
         frame_width=frame_width,
         frame_height=frame_height,
@@ -46,9 +62,135 @@ def _caption_options_for_video(media_proc, file_path: Path, *, font_path: str, f
     )
 
 
+def _clamp_vertical_position_pct(value: float) -> float:
+    return max(10.0, min(90.0, round(float(value), 1)))
+
+
+def _caption_track_from_options(options: CaptionRenderOptions) -> CaptionTrackSettings:
+    baseline_pct = ((options.play_res_y - options.bottom_margin) / max(options.play_res_y, 1)) * 100
+    return CaptionTrackSettings(vertical_position_pct=_clamp_vertical_position_pct(baseline_pct))
+
+
+def _bottom_margin_from_track_settings(play_res_y: int, track_settings: CaptionTrackSettings) -> int:
+    bottom_margin = round(play_res_y - (play_res_y * track_settings.vertical_position_pct / 100.0))
+    return max(24, min(play_res_y - 24, bottom_margin))
+
+
+def _parse_cut_regions(raw_regions: str) -> list[CutRegion]:
+    payload = json.loads(raw_regions)
+    if not isinstance(payload, list):
+        raise ValueError("cut_regions must be a JSON array")
+    parsed: list[CutRegion] = []
+    for item in payload:
+        parsed_region = CutRegion.model_validate(item)
+        if parsed_region.end_s <= parsed_region.start_s:
+            continue
+        parsed.append(parsed_region)
+    return sorted(parsed, key=lambda region: region.start_s)
+
+
+def _build_keep_ranges(cuts: list[CutRegion], duration: float) -> list[tuple[float, float]]:
+    keep_ranges: list[tuple[float, float]] = []
+    cursor = 0.0
+    for cut in cuts:
+        start = max(0.0, float(cut.start_s))
+        end = min(duration, float(cut.end_s))
+        if start > cursor:
+            keep_ranges.append((cursor, start))
+        cursor = max(cursor, end)
+    if cursor < duration:
+        keep_ranges.append((cursor, duration))
+    return keep_ranges
+
+
+def _editable_cues_from_caption_cues(cues: list) -> list[EditableCaptionCue]:
+    editable: list[EditableCaptionCue] = []
+    for index, cue in enumerate(cues):
+        text = str(getattr(cue, "text", "") or "").strip()
+        start_ms = int(getattr(cue, "start_ms", 0) or 0)
+        end_ms = int(getattr(cue, "end_ms", 0) or 0)
+        if not text or end_ms <= start_ms:
+            continue
+        editable.append(
+            EditableCaptionCue(
+                id=f"cue_{index + 1:04d}",
+                start_ms=start_ms,
+                end_ms=end_ms,
+                text=text,
+            )
+        )
+    return editable
+
+
+def _editor_session_preview_key(session_id: str) -> str:
+    return f"editor-sessions/{session_id}/preview.mp4"
+
+
+def _editor_session_manifest_key(session_id: str) -> str:
+    return f"editor-sessions/{session_id}/manifest.json"
+
+
+def _delete_storage_key(storage, key: str) -> None:
+    try:
+        storage.delete(key)
+    except Exception:
+        pass
+
+
 @router.get("/healthz")
 def healthcheck() -> dict[str, str]:
     return {"status": "ok"}
+
+
+def _build_editor_cues(
+    request: Request,
+    preview_path: Path,
+    cuts: list[CutRegion],
+    job_id: str | None,
+) -> list[EditableCaptionCue]:
+    raw_cues = []
+    if job_id:
+        try:
+            result = _service_from_request(request).get_result(job_id)
+            raw_cues = remap_cues_after_cuts(
+                segments_to_raw_cues(result.transcript.segments),
+                [cut.model_dump() for cut in cuts],
+            )
+        except Exception:
+            raw_cues = []
+
+    if not raw_cues:
+        try:
+            transcription = _transcription_provider_from_request(request).transcribe(preview_path, None)
+        except (TranscriptionProviderError, RuntimeError) as exc:
+            raise RuntimeError(f"Caption transcription failed: {exc}") from exc
+        raw_cues = segments_to_raw_cues(transcription.segments)
+
+    return _editable_cues_from_caption_cues(raw_cues)
+
+
+def _render_options_from_manifest(manifest: dict, track_settings: CaptionTrackSettings) -> CaptionRenderOptions:
+    play_res_x = int(manifest.get("play_res_x") or 1920)
+    play_res_y = int(manifest.get("play_res_y") or 1080)
+    return CaptionRenderOptions(
+        font_path=str(manifest.get("font_path") or ""),
+        font_name=str(manifest.get("font_name") or "Arial"),
+        font_size=int(manifest.get("font_size") or 42),
+        primary_color=str(manifest.get("primary_color") or "&H00FFFFFF"),
+        outline_color=str(manifest.get("outline_color") or "&H00000000"),
+        outline_width=int(manifest.get("outline_width") or 3),
+        angle=int(manifest.get("angle") or 0),
+        alignment=int(manifest.get("alignment") or 2),
+        margin_left=int(manifest.get("margin_left") or 40),
+        margin_right=int(manifest.get("margin_right") or 40),
+        bottom_margin=_bottom_margin_from_track_settings(play_res_y, track_settings),
+        max_chars_per_line=int(manifest.get("max_chars_per_line") or 32),
+        max_lines=int(manifest.get("max_lines") or 2),
+        soft_wrap_threshold=int(manifest.get("soft_wrap_threshold") or 26),
+        soft_wrap_increment_limit=int(manifest.get("soft_wrap_increment_limit") or 6),
+        play_res_x=play_res_x,
+        play_res_y=play_res_y,
+    )
 
 
 @router.get("/", response_class=HTMLResponse)
@@ -148,20 +290,22 @@ def ui_playground() -> str:
     }
     #previewPanel { display: none; margin-bottom: 14px; }
     #previewPanel.visible { display: block; }
+    .portrait-stage-card {
+      width: 100%;
+      max-width: 460px;
+      margin-left: auto;
+      margin-right: auto;
+    }
     .preview-wrap {
       position: relative;
       width: 100%;
-      aspect-ratio: 16 / 9;
+      max-width: 420px;
+      margin: 0 auto;
+      aspect-ratio: 9 / 16;
       background: #060d1a;
       border-radius: 8px;
       overflow: hidden;
       border: 1px solid #22345d;
-    }
-    .preview-wrap.portrait-preview {
-      aspect-ratio: 9 / 16;
-      max-width: 420px;
-      margin-left: auto;
-      margin-right: auto;
     }
     .preview-video {
       width: 100%;
@@ -184,6 +328,10 @@ def ui_playground() -> str:
       align-items: center;
       gap: 10px;
       margin-top: 10px;
+      width: 100%;
+      max-width: 420px;
+      margin-left: auto;
+      margin-right: auto;
     }
     .preview-controls button {
       min-width: 70px;
@@ -203,6 +351,9 @@ def ui_playground() -> str:
       cursor: pointer;
       user-select: none;
       -webkit-user-select: none;
+      width: 100%;
+      max-width: 420px;
+      margin: 0 auto;
     }
     .tl-track {
       position: absolute;
@@ -292,7 +443,11 @@ def ui_playground() -> str:
       display: flex;
       align-items: center;
       gap: 10px;
+      width: 100%;
+      max-width: 420px;
       margin-bottom: 10px;
+      margin-left: auto;
+      margin-right: auto;
       font-size: 13px;
       color: var(--muted);
     }
@@ -304,6 +459,211 @@ def ui_playground() -> str:
       color: var(--ok);
       font-weight: 600;
     }
+    #captionEditorCard { display: none; }
+    #captionEditorCard.visible { display: block; }
+    .editor-stage {
+      width: 100%;
+      max-width: 420px;
+      margin: 0 auto;
+    }
+    .editor-preview-wrap {
+      position: relative;
+    }
+    .editor-caption-overlay {
+      position: absolute;
+      left: 50%;
+      top: 78%;
+      transform: translate(-50%, -50%);
+      width: calc(100% - 36px);
+      padding: 0 8px;
+      text-align: center;
+      font-weight: 700;
+      font-size: 26px;
+      line-height: 1.2;
+      text-shadow:
+        -2px -2px 0 rgba(0, 0, 0, 0.95),
+        2px -2px 0 rgba(0, 0, 0, 0.95),
+        -2px 2px 0 rgba(0, 0, 0, 0.95),
+        2px 2px 0 rgba(0, 0, 0, 0.95);
+      pointer-events: none;
+      z-index: 3;
+    }
+    .editor-caption-overlay.hidden {
+      display: none;
+    }
+    .editor-controls {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      width: 100%;
+      max-width: 420px;
+      margin: 10px auto 0;
+    }
+    .editor-ruler {
+      position: relative;
+      height: 26px;
+      width: 100%;
+      max-width: 420px;
+      margin: 14px auto 0;
+      border-bottom: 1px solid rgba(122, 145, 196, 0.25);
+    }
+    .editor-ruler-tick {
+      position: absolute;
+      bottom: 0;
+      width: 1px;
+      height: 10px;
+      background: rgba(159, 176, 209, 0.35);
+    }
+    .editor-ruler-tick span {
+      position: absolute;
+      top: -16px;
+      left: 50%;
+      transform: translateX(-50%);
+      font-size: 10px;
+      color: var(--muted);
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }
+    .editor-timeline {
+      position: relative;
+      width: 100%;
+      max-width: 420px;
+      height: 72px;
+      margin: 8px auto 0;
+      border-radius: 10px;
+      border: 1px solid #22345d;
+      background: #0b1426;
+      overflow: hidden;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+    .editor-track {
+      position: absolute;
+      inset: 0;
+    }
+    .editor-track-fill {
+      position: absolute;
+      inset: 0 auto 0 0;
+      width: 0%;
+      background: linear-gradient(90deg, rgba(79, 124, 255, 0.18) 0%, rgba(79, 124, 255, 0.04) 100%);
+      pointer-events: none;
+    }
+    .editor-track-playhead {
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      width: 2px;
+      background: rgba(255, 255, 255, 0.75);
+      pointer-events: none;
+      z-index: 4;
+    }
+    .editor-track-hover {
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      width: 1px;
+      background: rgba(255,255,255,0.28);
+      pointer-events: none;
+      display: none;
+      z-index: 3;
+    }
+    .caption-block {
+      position: absolute;
+      top: 18px;
+      height: 38px;
+      border-radius: 8px;
+      background: linear-gradient(180deg, #ff9b2d 0%, #de6f00 100%);
+      color: #fff7eb;
+      font-size: 12px;
+      font-weight: 700;
+      line-height: 38px;
+      padding: 0 10px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      cursor: grab;
+      border: 1px solid rgba(255,255,255,0.14);
+      z-index: 2;
+    }
+    .caption-block.selected {
+      box-shadow: 0 0 0 2px rgba(231, 238, 252, 0.7);
+    }
+    .caption-block.dragging {
+      cursor: grabbing;
+      opacity: 0.95;
+    }
+    .caption-handle {
+      position: absolute;
+      top: 0;
+      width: 8px;
+      height: 100%;
+      background: rgba(0, 0, 0, 0.18);
+      cursor: ew-resize;
+    }
+    .caption-handle.start { left: 0; border-radius: 8px 0 0 8px; }
+    .caption-handle.end { right: 0; border-radius: 0 8px 8px 0; }
+    .editor-mini-preview {
+      bottom: 84px;
+    }
+    .cue-inspector {
+      width: 100%;
+      max-width: 420px;
+      margin: 14px auto 0;
+      padding: 12px;
+      border-radius: 10px;
+      border: 1px solid #22345d;
+      background: rgba(8, 16, 34, 0.85);
+    }
+    .cue-inspector textarea {
+      width: 100%;
+      min-height: 76px;
+      resize: vertical;
+      padding: 10px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: var(--panel-strong);
+      color: var(--text);
+    }
+    .cue-inspector-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+      margin-top: 10px;
+    }
+    .cue-inspector input[type="number"],
+    .cue-inspector input[type="range"] {
+      width: 100%;
+    }
+    .cue-nav {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-top: 10px;
+    }
+    .cue-nav-actions {
+      display: flex;
+      gap: 8px;
+    }
+    .cue-meta {
+      font-size: 12px;
+      color: var(--muted);
+      font-variant-numeric: tabular-nums;
+    }
+    .editor-status {
+      margin-top: 10px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .editor-status.ok { color: var(--ok); }
+    .editor-status.err { color: #ff6b6b; }
+    .download-link {
+      display: inline-block;
+      margin-top: 12px;
+      color: #bfd0ff;
+      text-decoration: none;
+    }
+    .download-link:hover { color: white; }
   </style>
 </head>
 <body>
@@ -351,16 +711,16 @@ def ui_playground() -> str:
     </div>
   </div>
 
-    <div class="card">
+  <div class="card portrait-stage-card">
     <h3>Response</h3>
     <div id="previewPanel">
-      <div id="previewWrap" class="preview-wrap">
+      <div class="preview-wrap">
         <video id="previewVideo" class="preview-video" preload="metadata"></video>
         <div id="previewPlaceholder" class="preview-placeholder">No video loaded</div>
       </div>
       <div class="preview-controls">
         <button id="playPauseBtn" type="button">Play</button>
-        <button id="autoCutBtn" class="ghost" type="button" disabled>Auto Cut + Captions</button>
+        <button id="autoCutBtn" class="ghost" type="button" disabled>Open Caption Editor</button>
         <span id="timeDisplay" class="preview-time">0:00 / 0:00</span>
       </div>
       <div id="tlContainer" class="tl-container">
@@ -376,12 +736,70 @@ def ui_playground() -> str:
     <pre id="out">{}</pre>
   </div>
 
-  <div id="autoCutCard" class="card">
-    <h3>Auto-Cut Result</h3>
+  <div id="captionEditorCard" class="card portrait-stage-card">
+    <h3>Caption Editor</h3>
+    <div class="editor-stage">
+      <div class="preview-wrap editor-preview-wrap">
+        <video id="editorVideo" class="preview-video" preload="metadata"></video>
+        <div id="editorCaptionOverlay" class="editor-caption-overlay hidden"></div>
+      </div>
+      <div class="editor-controls">
+        <button id="editorPlayBtn" type="button" class="ghost">Play</button>
+        <button id="renderEditorBtn" type="button">Render Final Video</button>
+        <span id="editorTimeDisplay" class="preview-time">0:00 / 0:00</span>
+      </div>
+      <div id="editorRuler" class="editor-ruler"></div>
+      <div id="editorTimeline" class="editor-timeline">
+        <div id="editorTrack" class="editor-track">
+          <div id="editorTrackFill" class="editor-track-fill"></div>
+          <div id="editorTrackPlayhead" class="editor-track-playhead"></div>
+          <div id="editorTrackHover" class="editor-track-hover"></div>
+        </div>
+        <div id="editorMiniPreview" class="tl-preview-overlay editor-mini-preview">
+          <canvas id="editorMiniCanvas" class="tl-preview-canvas"></canvas>
+          <span id="editorMiniTime" class="tl-preview-time">0:00</span>
+        </div>
+      </div>
+      <div class="cue-inspector">
+        <label for="cueText">Caption Text</label>
+        <textarea id="cueText" placeholder="Select a caption block to edit"></textarea>
+        <div class="cue-inspector-grid">
+          <div>
+            <label for="cueStartInput">Start (s)</label>
+            <input id="cueStartInput" type="number" min="0" step="0.1" />
+          </div>
+          <div>
+            <label for="cueEndInput">End (s)</label>
+            <input id="cueEndInput" type="number" min="0" step="0.1" />
+          </div>
+          <div>
+            <label for="cueDurationInput">Duration (s)</label>
+            <input id="cueDurationInput" type="number" min="0.3" step="0.1" />
+          </div>
+        </div>
+        <div style="margin-top:12px;">
+          <label for="captionHeightInput">Caption Height</label>
+          <input id="captionHeightInput" type="range" min="10" max="90" step="1" />
+        </div>
+        <div class="cue-nav">
+          <div class="cue-nav-actions">
+            <button id="prevCueBtn" type="button" class="ghost">Previous</button>
+            <button id="nextCueBtn" type="button" class="ghost">Next</button>
+          </div>
+          <span id="cueMeta" class="cue-meta">No cue selected</span>
+        </div>
+        <div id="editorStatus" class="editor-status"></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="autoCutCard" class="card portrait-stage-card">
+    <h3>Rendered Video</h3>
     <div id="autoCutInfo" class="autocut-info"></div>
-    <div id="autoCutWrap" class="preview-wrap">
+    <div class="preview-wrap">
       <video id="autoCutVideo" class="preview-video" controls preload="metadata"></video>
     </div>
+    <a id="autoCutDownload" class="download-link" href="#" download="autocut.mp4">Download Rendered Video</a>
   </div>
 
   <script>
@@ -390,7 +808,6 @@ def ui_playground() -> str:
 
     // --- Video Preview Panel ---
     const previewPanel = document.getElementById("previewPanel");
-    const previewWrap = document.getElementById("previewWrap");
     const previewVideo = document.getElementById("previewVideo");
     const previewPlaceholder = document.getElementById("previewPlaceholder");
     const playPauseBtn = document.getElementById("playPauseBtn");
@@ -402,12 +819,6 @@ def ui_playground() -> str:
       const s = Math.max(0, Math.floor(sec));
       const m = Math.floor(s / 60);
       return m + ":" + String(s % 60).padStart(2, "0");
-    }
-
-    function updatePreviewOrientation(videoEl, wrapEl) {
-      if (!videoEl || !wrapEl) return;
-      const isPortrait = (videoEl.videoHeight || 0) > (videoEl.videoWidth || 0);
-      wrapEl.classList.toggle("portrait-preview", isPortrait);
     }
 
     function updateTimeDisplay() {
@@ -427,12 +838,10 @@ def ui_playground() -> str:
         previewObjectUrl = URL.createObjectURL(file);
         previewVideo.src = previewObjectUrl;
         previewVideo.load();
-        previewWrap.classList.remove("portrait-preview");
         previewPlaceholder.style.display = "none";
         previewPanel.classList.add("visible");
       } else {
         previewVideo.removeAttribute("src");
-        previewWrap.classList.remove("portrait-preview");
         previewPlaceholder.style.display = "";
         previewPanel.classList.remove("visible");
       }
@@ -440,7 +849,6 @@ def ui_playground() -> str:
 
     previewVideo.addEventListener("loadedmetadata", function () {
       previewState.duration = previewVideo.duration || 0;
-      updatePreviewOrientation(previewVideo, previewWrap);
       updateTimeDisplay();
     });
 
@@ -601,28 +1009,113 @@ def ui_playground() -> str:
     });
     // --- End Advanced Playback Timeline ---
 
-    // --- Auto-Cut ---
+    // --- Caption Editor ---
     const autoCutBtn = document.getElementById("autoCutBtn");
     const autoCutCard = document.getElementById("autoCutCard");
-    const autoCutWrap = document.getElementById("autoCutWrap");
     const autoCutVideo = document.getElementById("autoCutVideo");
     const autoCutInfo = document.getElementById("autoCutInfo");
+    const autoCutDownload = document.getElementById("autoCutDownload");
+    const captionEditorCard = document.getElementById("captionEditorCard");
+    const editorVideo = document.getElementById("editorVideo");
+    const editorCaptionOverlay = document.getElementById("editorCaptionOverlay");
+    const editorPlayBtn = document.getElementById("editorPlayBtn");
+    const renderEditorBtn = document.getElementById("renderEditorBtn");
+    const editorTimeDisplay = document.getElementById("editorTimeDisplay");
+    const editorRuler = document.getElementById("editorRuler");
+    const editorTimeline = document.getElementById("editorTimeline");
+    const editorTrack = document.getElementById("editorTrack");
+    const editorTrackFill = document.getElementById("editorTrackFill");
+    const editorTrackPlayhead = document.getElementById("editorTrackPlayhead");
+    const editorTrackHover = document.getElementById("editorTrackHover");
+    const editorMiniPreview = document.getElementById("editorMiniPreview");
+    const editorMiniCanvas = document.getElementById("editorMiniCanvas");
+    const editorMiniTime = document.getElementById("editorMiniTime");
+    const cueText = document.getElementById("cueText");
+    const cueStartInput = document.getElementById("cueStartInput");
+    const cueEndInput = document.getElementById("cueEndInput");
+    const cueDurationInput = document.getElementById("cueDurationInput");
+    const captionHeightInput = document.getElementById("captionHeightInput");
+    const prevCueBtn = document.getElementById("prevCueBtn");
+    const nextCueBtn = document.getElementById("nextCueBtn");
+    const cueMeta = document.getElementById("cueMeta");
+    const editorStatus = document.getElementById("editorStatus");
+
+    const editorMiniCtx = editorMiniCanvas.getContext("2d");
+    const MIN_EDITOR_CUE_MS = 300;
     let detectedCutRegions = [];
     let autoCutObjectUrl = null;
+    let editorSessionId = null;
+    let editorDuration = 0;
+    let editorCues = [];
+    let selectedCueId = null;
+    let captionTrackSettings = { vertical_position_pct: 78 };
+    let editorThumbVideo = null;
+    let editorThumbBusy = false;
+    const editorPlayState = { isPlaying: false, currentTime: 0, duration: 0 };
+    const dragState = {
+      mode: null,
+      cueId: null,
+      startX: 0,
+      initialStartMs: 0,
+      initialEndMs: 0,
+      hoverActive: false,
+    };
+
+    function setEditorStatus(message, ok) {
+      editorStatus.textContent = message || "";
+      editorStatus.className = "editor-status" + (ok === true ? " ok" : ok === false ? " err" : "");
+    }
+
+    function clearRenderedOutput() {
+      if (autoCutObjectUrl) { URL.revokeObjectURL(autoCutObjectUrl); autoCutObjectUrl = null; }
+      autoCutVideo.removeAttribute("src");
+      autoCutInfo.innerHTML = "";
+      autoCutDownload.href = "#";
+      autoCutCard.classList.remove("visible");
+    }
+
+    function resetEditorSession() {
+      editorSessionId = null;
+      editorDuration = 0;
+      editorCues = [];
+      selectedCueId = null;
+      editorPlayState.isPlaying = false;
+      editorPlayState.currentTime = 0;
+      editorPlayState.duration = 0;
+      dragState.mode = null;
+      dragState.cueId = null;
+      if (editorThumbVideo) {
+        editorThumbVideo.src = "";
+        editorThumbVideo = null;
+      }
+      editorThumbBusy = false;
+      editorVideo.pause();
+      editorVideo.removeAttribute("src");
+      editorCaptionOverlay.textContent = "";
+      editorCaptionOverlay.classList.add("hidden");
+      editorTrack.innerHTML =
+        '<div id="editorTrackFill" class="editor-track-fill"></div>' +
+        '<div id="editorTrackPlayhead" class="editor-track-playhead"></div>' +
+        '<div id="editorTrackHover" class="editor-track-hover"></div>';
+      captionEditorCard.classList.remove("visible");
+      cueText.value = "";
+      cueStartInput.value = "";
+      cueEndInput.value = "";
+      cueDurationInput.value = "";
+      captionHeightInput.value = "78";
+      cueMeta.textContent = "No cue selected";
+      editorTimeDisplay.textContent = "0:00 / 0:00";
+      editorRuler.innerHTML = "";
+      setEditorStatus("", undefined);
+    }
 
     function clearCutRegions() {
       detectedCutRegions = [];
       autoCutBtn.disabled = true;
       tlContainer.querySelectorAll(".tl-cut-region").forEach(function (el) { el.remove(); });
-      if (autoCutObjectUrl) { URL.revokeObjectURL(autoCutObjectUrl); autoCutObjectUrl = null; }
-      autoCutVideo.removeAttribute("src");
-      autoCutWrap.classList.remove("portrait-preview");
-      autoCutCard.classList.remove("visible");
+      resetEditorSession();
+      clearRenderedOutput();
     }
-
-    autoCutVideo.addEventListener("loadedmetadata", function () {
-      updatePreviewOrientation(autoCutVideo, autoCutWrap);
-    });
 
     document.getElementById("media_file").addEventListener("change", clearCutRegions);
 
@@ -638,6 +1131,285 @@ def ui_playground() -> str:
         div.style.width = width + "%";
         tlContainer.appendChild(div);
       });
+    }
+
+    function sortEditorCues() {
+      editorCues.sort(function (a, b) {
+        if (a.start_ms !== b.start_ms) return a.start_ms - b.start_ms;
+        if (a.end_ms !== b.end_ms) return a.end_ms - b.end_ms;
+        return String(a.id).localeCompare(String(b.id));
+      });
+    }
+
+    function findCueIndexById(cueId) {
+      return editorCues.findIndex(function (cue) { return cue.id === cueId; });
+    }
+
+    function getSelectedCue() {
+      const index = findCueIndexById(selectedCueId);
+      return index >= 0 ? editorCues[index] : null;
+    }
+
+    function clampCueBounds(cue) {
+      cue.start_ms = Math.max(0, Math.round(cue.start_ms));
+      cue.end_ms = Math.max(cue.start_ms + MIN_EDITOR_CUE_MS, Math.round(cue.end_ms));
+      if (editorDuration > 0) {
+        const maxMs = Math.round(editorDuration * 1000);
+        if (cue.end_ms > maxMs) {
+          cue.end_ms = maxMs;
+          cue.start_ms = Math.max(0, cue.end_ms - MIN_EDITOR_CUE_MS);
+        }
+      }
+    }
+
+    function updateEditorTimeDisplay() {
+      editorTimeDisplay.textContent = fmtTime(editorPlayState.currentTime) + " / " + fmtTime(editorPlayState.duration);
+    }
+
+    function updateEditorPlaybackUI() {
+      const duration = Math.max(editorPlayState.duration, 0.001);
+      const pct = Math.max(0, Math.min(100, (editorPlayState.currentTime / duration) * 100));
+      const fillEl = document.getElementById("editorTrackFill");
+      const playheadEl = document.getElementById("editorTrackPlayhead");
+      if (fillEl) fillEl.style.width = pct + "%";
+      if (playheadEl) playheadEl.style.left = pct + "%";
+      editorPlayBtn.textContent = editorPlayState.isPlaying ? "Pause" : "Play";
+      updateEditorTimeDisplay();
+      updateCaptionOverlay();
+    }
+
+    function updateCaptionOverlay() {
+      const current = editorCues.find(function (cue) {
+        return editorPlayState.currentTime * 1000 >= cue.start_ms && editorPlayState.currentTime * 1000 <= cue.end_ms;
+      });
+      const topPct = Number(captionTrackSettings.vertical_position_pct || 78);
+      editorCaptionOverlay.style.top = topPct + "%";
+      if (!current || !String(current.text || "").trim()) {
+        editorCaptionOverlay.textContent = "";
+        editorCaptionOverlay.classList.add("hidden");
+        return;
+      }
+      editorCaptionOverlay.textContent = current.text;
+      editorCaptionOverlay.classList.remove("hidden");
+    }
+
+    function selectCue(cueId) {
+      selectedCueId = cueId;
+      renderEditorTimeline();
+      syncCueInspector();
+      updateCaptionOverlay();
+    }
+
+    function syncCueInspector() {
+      const cue = getSelectedCue();
+      const index = findCueIndexById(selectedCueId);
+      const hasCue = Boolean(cue);
+      cueText.disabled = !hasCue;
+      cueStartInput.disabled = !hasCue;
+      cueEndInput.disabled = !hasCue;
+      cueDurationInput.disabled = !hasCue;
+      prevCueBtn.disabled = !hasCue || index <= 0;
+      nextCueBtn.disabled = !hasCue || index < 0 || index >= editorCues.length - 1;
+      captionHeightInput.value = String(Math.round(Number(captionTrackSettings.vertical_position_pct || 78)));
+      if (!cue) {
+        cueText.value = "";
+        cueStartInput.value = "";
+        cueEndInput.value = "";
+        cueDurationInput.value = "";
+        cueMeta.textContent = "No cue selected";
+        return;
+      }
+      cueText.value = cue.text || "";
+      cueStartInput.value = (cue.start_ms / 1000).toFixed(1);
+      cueEndInput.value = (cue.end_ms / 1000).toFixed(1);
+      cueDurationInput.value = ((cue.end_ms - cue.start_ms) / 1000).toFixed(1);
+      cueMeta.textContent = "Cue " + (index + 1) + " of " + editorCues.length;
+    }
+
+    function renderEditorRuler() {
+      editorRuler.innerHTML = "";
+      const totalSeconds = Math.max(1, Math.ceil(editorDuration));
+      for (let second = 0; second <= totalSeconds; second += 1) {
+        const tick = document.createElement("div");
+        tick.className = "editor-ruler-tick";
+        tick.style.left = (second / totalSeconds) * 100 + "%";
+        const label = document.createElement("span");
+        label.textContent = fmtTime(second);
+        tick.appendChild(label);
+        editorRuler.appendChild(tick);
+      }
+    }
+
+    function renderEditorTimeline() {
+      const fillMarkup =
+        '<div id="editorTrackFill" class="editor-track-fill"></div>' +
+        '<div id="editorTrackPlayhead" class="editor-track-playhead"></div>' +
+        '<div id="editorTrackHover" class="editor-track-hover"></div>';
+      editorTrack.innerHTML = fillMarkup;
+      if (!editorDuration || !editorCues.length) {
+        updateEditorPlaybackUI();
+        return;
+      }
+
+      sortEditorCues();
+      editorCues.forEach(function (cue) {
+        const block = document.createElement("div");
+        const leftPct = (cue.start_ms / (editorDuration * 1000)) * 100;
+        const widthPct = ((cue.end_ms - cue.start_ms) / (editorDuration * 1000)) * 100;
+        block.className = "caption-block" + (cue.id === selectedCueId ? " selected" : "");
+        block.style.left = leftPct + "%";
+        block.style.width = Math.max(widthPct, 2) + "%";
+        block.dataset.cueId = cue.id;
+        block.title = cue.text || "";
+        block.textContent = cue.text || "";
+
+        const startHandle = document.createElement("span");
+        startHandle.className = "caption-handle start";
+        startHandle.dataset.role = "start";
+        const endHandle = document.createElement("span");
+        endHandle.className = "caption-handle end";
+        endHandle.dataset.role = "end";
+        block.appendChild(startHandle);
+        block.appendChild(endHandle);
+
+        block.addEventListener("click", function (event) {
+          event.stopPropagation();
+          selectCue(cue.id);
+        });
+        block.addEventListener("dblclick", function (event) {
+          event.stopPropagation();
+          editorVideo.currentTime = cue.start_ms / 1000;
+          editorPlayState.currentTime = editorVideo.currentTime;
+          updateEditorPlaybackUI();
+        });
+        block.addEventListener("mousedown", function (event) {
+          event.preventDefault();
+          event.stopPropagation();
+          const role = event.target && event.target.dataset ? event.target.dataset.role : "";
+          const selectedMode = role === "start" || role === "end" ? role : "move";
+          selectCue(cue.id);
+          dragState.mode = selectedMode;
+          dragState.cueId = cue.id;
+          dragState.startX = event.clientX;
+          dragState.initialStartMs = cue.start_ms;
+          dragState.initialEndMs = cue.end_ms;
+          block.classList.add("dragging");
+        });
+
+        editorTrack.appendChild(block);
+      });
+
+      updateEditorPlaybackUI();
+    }
+
+    function applyCueInputs() {
+      const cue = getSelectedCue();
+      if (!cue) return;
+      cue.text = cueText.value;
+      const startMs = Math.round(Number(cueStartInput.value || 0) * 1000);
+      const endMs = Math.round(Number(cueEndInput.value || 0) * 1000);
+      const durationMs = Math.round(Number(cueDurationInput.value || 0) * 1000);
+      if (document.activeElement === cueDurationInput && Number.isFinite(durationMs) && durationMs >= MIN_EDITOR_CUE_MS) {
+        cue.end_ms = cue.start_ms + durationMs;
+      } else {
+        if (Number.isFinite(startMs)) cue.start_ms = startMs;
+        if (Number.isFinite(endMs)) cue.end_ms = endMs;
+      }
+      clampCueBounds(cue);
+      renderEditorTimeline();
+      syncCueInspector();
+      updateCaptionOverlay();
+    }
+
+    function ensureEditorThumbVideo() {
+      if (editorThumbVideo) return;
+      if (!editorVideo.src) return;
+      editorThumbVideo = document.createElement("video");
+      editorThumbVideo.src = editorVideo.src;
+      editorThumbVideo.preload = "auto";
+      editorThumbVideo.muted = true;
+      editorThumbVideo.playsInline = true;
+    }
+
+    function sizeEditorPreviewCanvas() {
+      const vw = editorVideo.videoWidth || 16;
+      const vh = editorVideo.videoHeight || 9;
+      const ratio = vw / vh;
+      let cw;
+      let ch;
+      if (ratio >= 1) {
+        cw = THUMB_MAX;
+        ch = Math.round(THUMB_MAX / ratio);
+      } else {
+        ch = THUMB_MAX;
+        cw = Math.round(THUMB_MAX * ratio);
+      }
+      editorMiniCanvas.width = cw;
+      editorMiniCanvas.height = ch;
+      editorMiniCanvas.style.width = cw + "px";
+      editorMiniCanvas.style.height = ch + "px";
+    }
+
+    function drawEditorThumbAtTime(timeSec) {
+      if (!editorVideo.src || !editorPlayState.duration) return;
+      ensureEditorThumbVideo();
+      if (!editorThumbVideo || editorThumbBusy) return;
+      editorThumbBusy = true;
+      editorThumbVideo.currentTime = Math.max(0, Math.min(timeSec, editorPlayState.duration));
+      editorThumbVideo.onseeked = function () {
+        editorMiniCtx.drawImage(editorThumbVideo, 0, 0, editorMiniCanvas.width, editorMiniCanvas.height);
+        editorThumbBusy = false;
+      };
+    }
+
+    function editorPctFromClientX(clientX) {
+      const rect = editorTimeline.getBoundingClientRect();
+      if (!rect.width) return 0;
+      return Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+    }
+
+    function showEditorMiniPreview(pct) {
+      const rect = editorTimeline.getBoundingClientRect();
+      const px = pct * rect.width;
+      const timeSec = pct * editorPlayState.duration;
+      editorMiniTime.textContent = fmtTime(timeSec);
+      const half = (editorMiniCanvas.offsetWidth + 8) / 2 || 40;
+      const clamped = Math.max(half, Math.min(rect.width - half, px));
+      editorMiniPreview.style.left = clamped + "px";
+      editorMiniPreview.classList.add("show");
+      const hoverEl = document.getElementById("editorTrackHover");
+      if (hoverEl) {
+        hoverEl.style.left = px + "px";
+        hoverEl.style.display = "block";
+      }
+      drawEditorThumbAtTime(timeSec);
+    }
+
+    function hideEditorMiniPreview() {
+      editorMiniPreview.classList.remove("show");
+      const hoverEl = document.getElementById("editorTrackHover");
+      if (hoverEl) hoverEl.style.display = "none";
+    }
+
+    function openEditorSession(payload) {
+      editorSessionId = payload.session_id;
+      editorDuration = Number(payload.duration_seconds || 0);
+      editorCues = Array.isArray(payload.cues) ? payload.cues.slice() : [];
+      captionTrackSettings = payload.caption_track || { vertical_position_pct: 78 };
+      selectedCueId = editorCues.length ? editorCues[0].id : null;
+      editorPlayState.isPlaying = false;
+      editorPlayState.currentTime = 0;
+      editorPlayState.duration = editorDuration;
+      editorVideo.pause();
+      editorVideo.src = payload.preview_video_url || "";
+      editorVideo.load();
+      sizeEditorPreviewCanvas();
+      renderEditorRuler();
+      renderEditorTimeline();
+      syncCueInspector();
+      updateCaptionOverlay();
+      captionEditorCard.classList.add("visible");
+      setEditorStatus("Caption editor ready. Drag blocks or edit values below.", true);
     }
 
     async function runSilenceDetection() {
@@ -664,39 +1436,189 @@ def ui_playground() -> str:
       const file = document.getElementById("media_file").files[0];
       if (!file || !detectedCutRegions.length) return;
       autoCutBtn.disabled = true;
-      autoCutBtn.textContent = "Cutting...";
+      autoCutBtn.textContent = "Opening...";
       try {
         const fd = new FormData();
         fd.append("media_file", file);
         fd.append("cut_regions", JSON.stringify(detectedCutRegions));
         const jobId = jobInput.value.trim();
         if (jobId) fd.append("job_id", jobId);
-        fd.append("captions_enabled", "true");
-        const resp = await fetch("/v1/auto-cut", { method: "POST", body: fd });
+        const resp = await fetch("/v1/auto-cut/editor-session", { method: "POST", body: fd });
+        const payload = await readJsonOrText(resp);
         if (!resp.ok) {
-          const err = await resp.json();
-          showTranscript("Auto-cut error: " + (err.error || "Unknown error"));
+          const message = extractErrorMessage(payload, "Failed to open caption editor");
+          showTranscript("Caption editor error: " + message);
           return;
         }
-        const blob = await resp.blob();
+        openEditorSession(payload);
+      } catch (err) {
+        showTranscript("Caption editor error: " + (err.message || "Network request failed"));
+      } finally {
+        autoCutBtn.textContent = "Open Caption Editor";
+        autoCutBtn.disabled = !detectedCutRegions.length;
+      }
+    });
+
+    editorVideo.addEventListener("loadedmetadata", function () {
+      editorPlayState.duration = editorVideo.duration || editorDuration || 0;
+      editorDuration = editorPlayState.duration;
+      sizeEditorPreviewCanvas();
+      updateEditorPlaybackUI();
+    });
+
+    editorVideo.addEventListener("timeupdate", function () {
+      editorPlayState.currentTime = editorVideo.currentTime || 0;
+      updateEditorPlaybackUI();
+    });
+
+    editorVideo.addEventListener("ended", function () {
+      editorPlayState.isPlaying = false;
+      updateEditorPlaybackUI();
+    });
+
+    editorPlayBtn.addEventListener("click", function () {
+      if (!editorVideo.src || !editorPlayState.duration) return;
+      if (editorPlayState.isPlaying) {
+        editorVideo.pause();
+        editorPlayState.isPlaying = false;
+      } else {
+        editorVideo.play();
+        editorPlayState.isPlaying = true;
+      }
+      updateEditorPlaybackUI();
+    });
+
+    editorTimeline.addEventListener("mousemove", function (event) {
+      if (!editorPlayState.duration || dragState.mode) return;
+      const pct = editorPctFromClientX(event.clientX);
+      showEditorMiniPreview(pct);
+      dragState.hoverActive = true;
+    });
+
+    editorTimeline.addEventListener("mouseleave", function () {
+      dragState.hoverActive = false;
+      if (!dragState.mode) hideEditorMiniPreview();
+    });
+
+    editorTimeline.addEventListener("mousedown", function (event) {
+      if (!editorPlayState.duration) return;
+      if (event.target !== editorTimeline && event.target !== editorTrack) return;
+      event.preventDefault();
+      const pct = editorPctFromClientX(event.clientX);
+      editorVideo.currentTime = pct * editorPlayState.duration;
+      editorPlayState.currentTime = editorVideo.currentTime;
+      updateEditorPlaybackUI();
+      showEditorMiniPreview(pct);
+    });
+
+    document.addEventListener("mousemove", function (event) {
+      if (!dragState.mode) return;
+      const cue = editorCues.find(function (item) { return item.id === dragState.cueId; });
+      if (!cue || !editorDuration) return;
+      const timelineWidth = editorTimeline.getBoundingClientRect().width || 1;
+      const deltaPct = (event.clientX - dragState.startX) / timelineWidth;
+      const deltaMs = Math.round((deltaPct * editorDuration * 1000) / 100) * 100;
+      if (dragState.mode === "move") {
+        const durationMs = dragState.initialEndMs - dragState.initialStartMs;
+        cue.start_ms = dragState.initialStartMs + deltaMs;
+        cue.end_ms = cue.start_ms + durationMs;
+      } else if (dragState.mode === "start") {
+        cue.start_ms = dragState.initialStartMs + deltaMs;
+      } else if (dragState.mode === "end") {
+        cue.end_ms = dragState.initialEndMs + deltaMs;
+      }
+      clampCueBounds(cue);
+      renderEditorTimeline();
+      syncCueInspector();
+      updateCaptionOverlay();
+    });
+
+    document.addEventListener("mouseup", function () {
+      if (!dragState.mode) return;
+      dragState.mode = null;
+      dragState.cueId = null;
+      document.querySelectorAll(".caption-block.dragging").forEach(function (node) {
+        node.classList.remove("dragging");
+      });
+      if (!dragState.hoverActive) hideEditorMiniPreview();
+    });
+
+    cueText.addEventListener("input", function () {
+      const cue = getSelectedCue();
+      if (!cue) return;
+      cue.text = cueText.value;
+      renderEditorTimeline();
+      updateCaptionOverlay();
+    });
+
+    cueStartInput.addEventListener("input", applyCueInputs);
+    cueEndInput.addEventListener("input", applyCueInputs);
+    cueDurationInput.addEventListener("input", applyCueInputs);
+
+    captionHeightInput.addEventListener("input", function () {
+      captionTrackSettings.vertical_position_pct = Number(captionHeightInput.value || 78);
+      updateCaptionOverlay();
+    });
+
+    prevCueBtn.addEventListener("click", function () {
+      const index = findCueIndexById(selectedCueId);
+      if (index > 0) selectCue(editorCues[index - 1].id);
+    });
+
+    nextCueBtn.addEventListener("click", function () {
+      const index = findCueIndexById(selectedCueId);
+      if (index >= 0 && index < editorCues.length - 1) selectCue(editorCues[index + 1].id);
+    });
+
+    renderEditorBtn.addEventListener("click", async function () {
+      if (!editorSessionId || !editorCues.length) return;
+      renderEditorBtn.disabled = true;
+      setEditorStatus("Rendering final video...", undefined);
+      try {
+        const response = await fetch(`/v1/auto-cut/editor-session/${encodeURIComponent(editorSessionId)}/render`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            cues: editorCues.map(function (cue) {
+              return {
+                id: cue.id,
+                start_ms: cue.start_ms,
+                end_ms: cue.end_ms,
+                text: cue.text,
+              };
+            }),
+            caption_track: {
+              vertical_position_pct: Number(captionTrackSettings.vertical_position_pct || 78),
+            },
+          }),
+        });
+        if (!response.ok) {
+          const payload = await readJsonOrText(response);
+          throw new Error(extractErrorMessage(payload, "Render failed"));
+        }
+
+        const blob = await response.blob();
         if (autoCutObjectUrl) URL.revokeObjectURL(autoCutObjectUrl);
         autoCutObjectUrl = URL.createObjectURL(blob);
         autoCutVideo.src = autoCutObjectUrl;
         autoCutVideo.load();
+        autoCutDownload.href = autoCutObjectUrl;
 
-        const totalCut = detectedCutRegions.reduce(function (sum, r) { return sum + (r.end_s - r.start_s); }, 0);
+        const totalCut = detectedCutRegions.reduce(function (sum, region) {
+          return sum + (region.end_s - region.start_s);
+        }, 0);
         autoCutInfo.innerHTML =
           '<span>Cuts: <span class="cut-count">' + detectedCutRegions.length + " regions</span></span>" +
           '<span>Time saved: <span class="saved-time">' + fmtTime(totalCut) + "</span></span>";
         autoCutCard.classList.add("visible");
+        setEditorStatus("Rendered video ready below.", true);
       } catch (err) {
-        showTranscript("Auto-cut error: " + (err.message || "Network request failed"));
+        setEditorStatus(err.message || "Render failed", false);
       } finally {
-        autoCutBtn.textContent = "Auto Cut + Captions";
-        autoCutBtn.disabled = !detectedCutRegions.length;
+        renderEditorBtn.disabled = false;
       }
     });
-    // --- End Auto-Cut ---
+    // --- End Caption Editor ---
 
     function showTranscript(value) {
       out.textContent = String(value ?? "").trim() || "{}";
@@ -987,7 +1909,6 @@ async def auto_cut(
 
             if not cues:
                 raise RuntimeError("No usable caption cues were produced")
-
             _media_proc.write_ass_subtitles(cues, Path(subtitle_tmp.name), render_options)
             _media_proc.burn_subtitles_into_video(
                 Path(output_tmp.name),
@@ -1015,3 +1936,158 @@ async def auto_cut(
         return JSONResponse({"error": str(exc)}, status_code=400)
     finally:
         Path(input_tmp.name).unlink(missing_ok=True)
+
+
+@router.post("/v1/auto-cut/editor-session", response_model=AutoCutEditorSessionResponse)
+async def create_auto_cut_editor_session(
+    request: Request,
+    media_file: UploadFile = File(...),
+    cut_regions: str = Form(...),
+    job_id: str | None = Form(default=None),
+):
+    content_type = media_file.content_type or ""
+    if not content_type.startswith("video/"):
+        return JSONResponse({"error": "Caption editor requires a video upload"}, status_code=400)
+
+    suffix = Path(media_file.filename or "upload").suffix or ".mp4"
+    input_tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+    preview_tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+    preview_tmp.close()
+    try:
+        input_tmp.write(await media_file.read())
+        input_tmp.close()
+
+        cuts = _parse_cut_regions(cut_regions)
+        duration = _media_proc._probe_duration(Path(input_tmp.name))
+        keep_ranges = _build_keep_ranges(cuts, duration)
+        if not keep_ranges:
+            return JSONResponse({"error": "Nothing left after cuts"}, status_code=400)
+
+        _media_proc.trim_keep_ranges(Path(input_tmp.name), Path(preview_tmp.name), keep_ranges)
+
+        container = _container_from_request(request)
+        render_options = _caption_options_for_video(
+            _media_proc,
+            Path(preview_tmp.name),
+            font_path=container.settings.caption_font_path,
+            font_name=container.settings.caption_font_name,
+        )
+        editable_cues = _build_editor_cues(request, Path(preview_tmp.name), cuts, job_id)
+        if not editable_cues:
+            raise RuntimeError("No usable caption cues were produced")
+
+        session_id = uuid4().hex
+        preview_key = _editor_session_preview_key(session_id)
+        manifest_key = _editor_session_manifest_key(session_id)
+        caption_track = _caption_track_from_options(render_options)
+        manifest = {
+            "preview_video_key": preview_key,
+            "duration_seconds": round(float(_media_proc._probe_duration(Path(preview_tmp.name))), 3),
+            "play_res_x": render_options.play_res_x,
+            "play_res_y": render_options.play_res_y,
+            "font_name": render_options.font_name,
+            "font_path": render_options.font_path,
+            "font_size": render_options.font_size,
+            "primary_color": render_options.primary_color,
+            "outline_color": render_options.outline_color,
+            "outline_width": render_options.outline_width,
+            "angle": render_options.angle,
+            "alignment": render_options.alignment,
+            "margin_left": render_options.margin_left,
+            "margin_right": render_options.margin_right,
+            "max_chars_per_line": render_options.max_chars_per_line,
+            "max_lines": render_options.max_lines,
+            "soft_wrap_threshold": render_options.soft_wrap_threshold,
+            "soft_wrap_increment_limit": render_options.soft_wrap_increment_limit,
+            "default_vertical_position_pct": caption_track.vertical_position_pct,
+        }
+        container.storage.put_file(preview_key, Path(preview_tmp.name))
+        container.storage.put_bytes(manifest_key, json.dumps(manifest).encode("utf-8"))
+
+        return AutoCutEditorSessionResponse(
+            session_id=session_id,
+            preview_video_url=f"/v1/auto-cut/editor-session/{session_id}/preview",
+            duration_seconds=manifest["duration_seconds"],
+            cut_regions=cuts,
+            cues=editable_cues,
+            caption_track=caption_track,
+        )
+    except (RuntimeError, json.JSONDecodeError, ValueError, KeyError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    finally:
+        Path(input_tmp.name).unlink(missing_ok=True)
+        Path(preview_tmp.name).unlink(missing_ok=True)
+
+
+@router.get("/v1/auto-cut/editor-session/{session_id}/preview")
+def get_auto_cut_editor_preview(request: Request, session_id: str):
+    container = _container_from_request(request)
+    try:
+        payload = container.storage.get_bytes(_editor_session_preview_key(session_id))
+    except FileNotFoundError:
+        return JSONResponse({"error": "Editor session not found"}, status_code=404)
+    except Exception:
+        return JSONResponse({"error": "Editor preview is unavailable"}, status_code=404)
+    return Response(content=payload, media_type="video/mp4")
+
+
+@router.post("/v1/auto-cut/editor-session/{session_id}/render")
+async def render_auto_cut_editor_session(
+    request: Request,
+    session_id: str,
+    body: RenderEditedCaptionsRequest,
+):
+    container = _container_from_request(request)
+    preview_key = _editor_session_preview_key(session_id)
+    manifest_key = _editor_session_manifest_key(session_id)
+    try:
+        manifest = json.loads(container.storage.get_bytes(manifest_key).decode("utf-8"))
+        preview_bytes = container.storage.get_bytes(preview_key)
+    except FileNotFoundError:
+        return JSONResponse({"error": "Editor session not found"}, status_code=404)
+    except Exception:
+        return JSONResponse({"error": "Editor session not found"}, status_code=404)
+
+    track_settings = CaptionTrackSettings(
+        vertical_position_pct=_clamp_vertical_position_pct(body.caption_track.vertical_position_pct)
+    )
+    cues = normalize_edited_cues(body.cues)
+    if not cues:
+        return JSONResponse({"error": "At least one valid caption cue is required"}, status_code=400)
+
+    preview_tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+    subtitle_tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".ass")
+    subtitle_tmp.close()
+    output_tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+    output_tmp.close()
+    try:
+        preview_tmp.write(preview_bytes)
+        preview_tmp.close()
+
+        render_options = _render_options_from_manifest(manifest, track_settings)
+        _media_proc.write_ass_subtitles(cues, Path(subtitle_tmp.name), render_options)
+        _media_proc.burn_subtitles_into_video(
+            Path(preview_tmp.name),
+            Path(subtitle_tmp.name),
+            Path(output_tmp.name),
+            render_options,
+        )
+
+        def _cleanup() -> None:
+            Path(preview_tmp.name).unlink(missing_ok=True)
+            Path(subtitle_tmp.name).unlink(missing_ok=True)
+            Path(output_tmp.name).unlink(missing_ok=True)
+            _delete_storage_key(container.storage, preview_key)
+            _delete_storage_key(container.storage, manifest_key)
+
+        return FileResponse(
+            output_tmp.name,
+            media_type="video/mp4",
+            filename="autocut.mp4",
+            background=BackgroundTask(_cleanup),
+        )
+    except RuntimeError as exc:
+        Path(preview_tmp.name).unlink(missing_ok=True)
+        Path(subtitle_tmp.name).unlink(missing_ok=True)
+        Path(output_tmp.name).unlink(missing_ok=True)
+        return JSONResponse({"error": str(exc)}, status_code=400)

@@ -121,19 +121,22 @@ class HookSuggestionResponse(BaseModel):
     suggestions: list[HookSuggestion]
 
 
+class CutRegion(BaseModel):
+    start_s: float
+    end_s: float
+
+
 class CaptionCue(BaseModel):
     start_ms: int
     end_ms: int
     text: str
 
 
-class VideoGeometry(BaseModel):
-    encoded_width: int
-    encoded_height: int
-    rotation_degrees: int
-    display_width: int
-    display_height: int
-    is_portrait_display: bool
+class EditableCaptionCue(BaseModel):
+    id: str
+    start_ms: int
+    end_ms: int
+    text: str
 
 
 class CaptionRenderOptions(BaseModel):
@@ -143,14 +146,35 @@ class CaptionRenderOptions(BaseModel):
     primary_color: str
     outline_color: str
     outline_width: int
+    angle: int = 0
     alignment: int = 2
     margin_left: int = 40
     margin_right: int = 40
     bottom_margin: int
     max_chars_per_line: int
     max_lines: int
-    soft_wrap_threshold: int = 28
+    soft_wrap_threshold: int = 26
     soft_wrap_increment_limit: int = 6
+    play_res_x: int = 1920
+    play_res_y: int = 1080
+
+
+class CaptionTrackSettings(BaseModel):
+    vertical_position_pct: float
+
+
+class AutoCutEditorSessionResponse(BaseModel):
+    session_id: str
+    preview_video_url: str
+    duration_seconds: float
+    cut_regions: list[CutRegion]
+    cues: list[EditableCaptionCue]
+    caption_track: CaptionTrackSettings
+
+
+class RenderEditedCaptionsRequest(BaseModel):
+    cues: list[EditableCaptionCue]
+    caption_track: CaptionTrackSettings
 
 
 class ReelScriptRequest(BaseModel):
