@@ -69,6 +69,8 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("AIEDIT_WANDB_LOG_REEL_PROMPTS", "WANDB_LOG_REEL_PROMPTS"),
     )
     hooks_catalog_path: str = "output/hooks/viral_hooks.json"
+    caption_font_name: str = "Arial"
+    caption_font_path: str = ""
     provider_timeout_seconds: float = Field(default=60.0, ge=1.0)
 
     model_config = SettingsConfigDict(

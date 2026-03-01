@@ -7,10 +7,11 @@ import wave
 from pathlib import Path
 from typing import Protocol
 
+from app.captions import write_ass_subtitles
 from app.constants import SUPPORTED_MEDIA_TYPES
 from app.errors import ServiceError
 from app.constants import ErrorCode
-from app.schemas import MediaInfo
+from app.schemas import CaptionCue, CaptionRenderOptions, MediaInfo
 
 
 class MediaProcessor(Protocol):
@@ -202,6 +203,56 @@ class FfmpegMediaProcessor:
         if completed.returncode != 0:
             raise RuntimeError(completed.stderr.strip() or "ffmpeg concat+audio failed")
 
+    def write_ass_subtitles(
+        self,
+        cues: list[CaptionCue],
+        output_path: Path,
+        options: CaptionRenderOptions,
+    ) -> None:
+        write_ass_subtitles(cues, output_path, options)
+
+    def burn_subtitles_into_video(
+        self,
+        input_video_path: Path,
+        subtitle_path: Path,
+        output_path: Path,
+        options: CaptionRenderOptions,
+    ) -> None:
+        ffmpeg = _resolve_ffmpeg_binary()
+        if ffmpeg is None:
+            raise RuntimeError("ffmpeg is required for subtitle rendering")
+        if not self._supports_libass(ffmpeg):
+            raise RuntimeError("ffmpeg subtitle rendering is unavailable (libass/subtitles filter missing)")
+
+        subtitle_arg = _escape_filter_path(subtitle_path)
+        filter_value = f"subtitles='{subtitle_arg}'"
+        if options.font_path:
+            fonts_dir = Path(options.font_path).expanduser().resolve().parent
+            filter_value += f":fontsdir='{_escape_filter_path(fonts_dir)}'"
+
+        command = [
+            ffmpeg,
+            "-y",
+            "-i",
+            str(input_video_path),
+            "-vf",
+            filter_value,
+            "-c:v",
+            "libx264",
+            "-preset",
+            "fast",
+            "-crf",
+            "23",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "128k",
+            str(output_path),
+        ]
+        completed = subprocess.run(command, capture_output=True, text=True, check=False)
+        if completed.returncode != 0:
+            raise RuntimeError(completed.stderr.strip() or "ffmpeg subtitle burn failed")
+
     def _expand_clips_to_cover_audio(self, clip_paths: list[Path], audio_path: Path) -> list[Path]:
         audio_duration = self._probe_duration(audio_path)
         if audio_duration <= 0:
@@ -263,6 +314,14 @@ class FfmpegMediaProcessor:
 
         raise RuntimeError("Unable to determine media duration; install ffprobe or upload WAV audio")
 
+    def _supports_libass(self, ffmpeg_binary: str) -> bool:
+        command = [ffmpeg_binary, "-hide_banner", "-filters"]
+        completed = subprocess.run(command, capture_output=True, text=True, check=False)
+        if completed.returncode != 0:
+            return False
+        filters_text = f"{completed.stdout}\n{completed.stderr}"
+        return " subtitles " in filters_text or filters_text.rstrip().endswith(" subtitles")
+
 
 def _parse_silence_regions(stderr_text: str) -> list[dict[str, float]]:
     regions: list[dict[str, float]] = []
@@ -296,3 +355,8 @@ def _resolve_ffmpeg_binary() -> str | None:
         return imageio_ffmpeg.get_ffmpeg_exe()
     except Exception:
         return None
+
+
+def _escape_filter_path(path: Path) -> str:
+    raw = str(path)
+    return raw.replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")

@@ -121,6 +121,24 @@ class HookSuggestionResponse(BaseModel):
     suggestions: list[HookSuggestion]
 
 
+class CaptionCue(BaseModel):
+    start_ms: int
+    end_ms: int
+    text: str
+
+
+class CaptionRenderOptions(BaseModel):
+    font_path: str
+    font_name: str
+    font_size: int
+    primary_color: str
+    outline_color: str
+    outline_width: int
+    bottom_margin: int
+    max_chars_per_line: int
+    max_lines: int
+
+
 class ReelScriptRequest(BaseModel):
     """Request to generate a reel script."""
 
