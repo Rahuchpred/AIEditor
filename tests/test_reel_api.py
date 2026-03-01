@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi.testclient import TestClient
 
 from app.main import create_app
+from app.schemas import VideoGeometry
 
 
 def test_assemble_reel_returns_video_response(monkeypatch):
@@ -94,6 +95,16 @@ def test_assemble_reel_with_captions_transcribes_and_burns(monkeypatch):
             self.concat_calls.append((list(clip_paths), audio_path))
             output_path.write_bytes(b"video-bytes")
 
+        def probe_video_geometry(self, path):
+            return VideoGeometry(
+                encoded_width=1080,
+                encoded_height=1920,
+                rotation_degrees=0,
+                display_width=1080,
+                display_height=1920,
+                is_portrait_display=True,
+            )
+
         def write_ass_subtitles(self, cues, output_path, options):
             self.subtitle_writes.append((list(cues), output_path, options))
             output_path.write_text("ass", encoding="utf-8")
@@ -108,7 +119,13 @@ def test_assemble_reel_with_captions_transcribes_and_burns(monkeypatch):
 
             return TranscriptionResult(
                 language_detected="en",
-                segments=[TimedTextSegment(start_ms=0, end_ms=1000, text="Caption line")],
+                segments=[
+                    TimedTextSegment(
+                        start_ms=0,
+                        end_ms=1600,
+                        text="one of these six hooks is the one you should use",
+                    )
+                ],
             )
 
     processor = FakeProcessor()
@@ -132,3 +149,8 @@ def test_assemble_reel_with_captions_transcribes_and_burns(monkeypatch):
     assert response.content == b"captioned-video-bytes"
     assert len(processor.subtitle_writes) == 1
     assert len(processor.subtitle_burns) == 1
+    cues, _output_path, options = processor.subtitle_writes[0]
+    assert options.max_chars_per_line == 22
+    assert options.bottom_margin == 461
+    assert cues[0].text.split("\n")[0] == "one of these six hooks"
+    assert all(len(line) <= 22 for cue in cues for line in cue.text.split("\n"))
