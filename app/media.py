@@ -161,35 +161,38 @@ class FfmpegMediaProcessor:
         if not clip_paths:
             raise RuntimeError("No clips to concatenate")
 
-        n = len(clip_paths)
-        durations = [self._probe_duration(p) for p in clip_paths]
+        expanded_clip_paths = self._expand_clips_to_cover_audio(clip_paths, audio_path)
+        n = len(expanded_clip_paths)
 
         filter_parts: list[str] = []
         concat_inputs = ""
-        for i, (path, dur) in enumerate(zip(clip_paths, durations)):
-            scale_pad = (
+        for i, _path in enumerate(expanded_clip_paths):
+            normalize_video = (
                 f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
-                f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2"
+                f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,"
+                "fps=30,"
+                "format=yuv420p,"
+                "setsar=1,"
+                "setpts=PTS-STARTPTS"
             )
             filter_parts.append(
-                f"[{i}:v]{scale_pad},setpts=PTS-STARTPTS[v{i}];"
-                f"anullsrc=channel_layout=stereo:sample_rate=44100,"
-                f"atrim=0:{dur},asetpts=PTS-STARTPTS[a{i}];"
+                f"[{i}:v]{normalize_video}[v{i}];"
             )
-            concat_inputs += f"[v{i}][a{i}]"
+            concat_inputs += f"[v{i}]"
 
-        filter_complex = "".join(filter_parts) + f"{concat_inputs}concat=n={n}:v=1:a=1[outv][outa]"
+        filter_complex = "".join(filter_parts) + f"{concat_inputs}concat=n={n}:v=1:a=0[outv]"
 
-        inputs = [str(p) for p in clip_paths] + [str(audio_path)]
+        inputs = [str(p) for p in expanded_clip_paths] + [str(audio_path)]
         flat_inputs: list[str] = []
         for inp in inputs:
             flat_inputs.extend(["-i", inp])
 
+        audio_input_index = n
         command = [
             ffmpeg, "-y",
             *flat_inputs,
             "-filter_complex", filter_complex,
-            "-map", "[outv]", "-map", f"{n}:a",
+            "-map", "[outv]", "-map", f"{audio_input_index}:a",
             "-shortest",
             "-c:v", "libx264", "-preset", "fast", "-crf", "23",
             "-c:a", "aac", "-b:a", "128k",
@@ -198,6 +201,29 @@ class FfmpegMediaProcessor:
         completed = subprocess.run(command, capture_output=True, text=True, check=False)
         if completed.returncode != 0:
             raise RuntimeError(completed.stderr.strip() or "ffmpeg concat+audio failed")
+
+    def _expand_clips_to_cover_audio(self, clip_paths: list[Path], audio_path: Path) -> list[Path]:
+        audio_duration = self._probe_duration(audio_path)
+        if audio_duration <= 0:
+            raise RuntimeError("Voiceover duration must be greater than zero")
+
+        usable_clips: list[tuple[Path, float]] = []
+        for path in clip_paths:
+            duration = self._probe_duration(path)
+            if duration > 0:
+                usable_clips.append((path, duration))
+        if not usable_clips:
+            raise RuntimeError("No clips with usable duration")
+
+        expanded_clip_paths: list[Path] = []
+        covered_duration = 0.0
+        index = 0
+        while covered_duration < audio_duration:
+            path, duration = usable_clips[index % len(usable_clips)]
+            expanded_clip_paths.append(path)
+            covered_duration += duration
+            index += 1
+        return expanded_clip_paths
 
     def _probe_duration(self, file_path: Path) -> float:
         ffprobe = shutil.which("ffprobe")
