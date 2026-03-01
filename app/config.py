@@ -29,6 +29,10 @@ class Settings(BaseSettings):
         default=None,
         validation_alias=AliasChoices("AIEDIT_ELEVENLABS_API_KEY", "ELEVENLABS_API_KEY"),
     )
+    elevenlabs_voice_api_key: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("AIEDIT_ELEVENLABS_VOICE_API_KEY", "ELEVENLABS_VOICE_API_KEY"),
+    )
     elevenlabs_api_url: str = "https://api.elevenlabs.io/v1/speech-to-text"
     elevenlabs_model_id: str = Field(
         default="scribe_v1",
@@ -57,3 +61,7 @@ class Settings(BaseSettings):
         extra="ignore",
         populate_by_name=True,
     )
+
+    @property
+    def elevenlabs_reel_api_key(self) -> str | None:
+        return self.elevenlabs_voice_api_key or self.elevenlabs_api_key

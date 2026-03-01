@@ -171,3 +171,22 @@ def test_mistral_clean_captions_rejects_non_json():
     )
     with pytest.raises(LLMProviderError, match="valid JSON"):
         provider.clean_captions(transcription, include_timestamps=True)
+
+
+def test_voice_cloning_provider_prefers_dedicated_voice_key():
+    settings = Settings(
+        database_url="sqlite+pysqlite:///./providers-test.db",
+        task_execution_mode="inline",
+        storage_backend="local",
+        local_storage_path=".local-storage",
+        elevenlabs_api_key="transcription-key",
+        elevenlabs_voice_api_key="voice-key",
+        mistral_api_key="test-mistral-key",
+    )
+    provider = HttpElevenLabsTranscriptionProvider(settings)
+    assert provider._settings.elevenlabs_api_key == "transcription-key"
+
+    from app.providers import ElevenLabsVoiceCloningProvider
+
+    voice_provider = ElevenLabsVoiceCloningProvider(settings)
+    assert voice_provider._api_key == "voice-key"

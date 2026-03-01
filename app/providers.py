@@ -152,9 +152,13 @@ class ElevenLabsVoiceCloningProvider:
         self._settings = settings
         self._client = httpx.Client(timeout=settings.provider_timeout_seconds)
 
+    @property
+    def _api_key(self) -> str | None:
+        return self._settings.elevenlabs_reel_api_key
+
     def clone_voice(self, name: str, audio_files: list[tuple[str, bytes]]) -> str:
         """Create an instant voice clone from audio samples. Returns voice_id."""
-        if not self._settings.elevenlabs_api_key:
+        if not self._api_key:
             raise VoiceCloningProviderError("Missing ElevenLabs API key")
         if not audio_files:
             raise VoiceCloningProviderError("At least one audio file is required for voice cloning")
@@ -176,7 +180,7 @@ class ElevenLabsVoiceCloningProvider:
         try:
             response = self._post_with_retries(
                 f"{self._BASE_URL}/voices/add",
-                headers={"xi-api-key": self._settings.elevenlabs_api_key},
+                headers={"xi-api-key": self._api_key},
                 data=data,
                 files=files,
             )
@@ -203,7 +207,7 @@ class ElevenLabsVoiceCloningProvider:
 
     def text_to_speech(self, voice_id: str, text: str) -> bytes:
         """Generate speech from text using the given voice. Returns MP3 audio bytes."""
-        if not self._settings.elevenlabs_api_key:
+        if not self._api_key:
             raise VoiceCloningProviderError("Missing ElevenLabs API key")
 
         url = f"{self._BASE_URL}/text-to-speech/{voice_id}"
@@ -213,7 +217,7 @@ class ElevenLabsVoiceCloningProvider:
             response = self._post_with_retries(
                 url,
                 headers={
-                    "xi-api-key": self._settings.elevenlabs_api_key,
+                    "xi-api-key": self._api_key,
                     "Content-Type": "application/json",
                 },
                 params=params,
@@ -241,13 +245,13 @@ class ElevenLabsVoiceCloningProvider:
 
     def list_voices(self) -> list[dict[str, Any]]:
         """List all voices (including cloned). Returns list of voice objects."""
-        if not self._settings.elevenlabs_api_key:
+        if not self._api_key:
             raise VoiceCloningProviderError("Missing ElevenLabs API key")
 
         try:
             response = self._client.get(
                 f"{self._BASE_URL}/voices",
-                headers={"xi-api-key": self._settings.elevenlabs_api_key},
+                headers={"xi-api-key": self._api_key},
             )
         except httpx.TimeoutException as exc:
             raise VoiceCloningProviderError("ElevenLabs list voices timed out")
@@ -273,13 +277,13 @@ class ElevenLabsVoiceCloningProvider:
 
     def delete_voice(self, voice_id: str) -> None:
         """Delete a cloned voice."""
-        if not self._settings.elevenlabs_api_key:
+        if not self._api_key:
             raise VoiceCloningProviderError("Missing ElevenLabs API key")
 
         try:
             response = self._client.delete(
                 f"{self._BASE_URL}/voices/{voice_id}",
-                headers={"xi-api-key": self._settings.elevenlabs_api_key},
+                headers={"xi-api-key": self._api_key},
             )
         except httpx.TimeoutException as exc:
             raise VoiceCloningProviderError("ElevenLabs delete voice timed out")
