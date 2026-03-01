@@ -10,10 +10,11 @@ from fastapi import APIRouter, Body, File, Form, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from starlette.background import BackgroundTask
 
-from app.captions import default_caption_render_options, segments_to_caption_cues
+from app.captions import default_caption_render_options, segments_to_caption_cues, write_ass_subtitles
 from app.container import get_settings
 from app.hook_catalog import HookCatalogError, get_hook_catalog_service
 from app.media import FfmpegMediaProcessor
+from app.premiere import PremiereClip, build_premiere_xml
 from app.providers import (
     ElevenLabsVoiceCloningProvider,
     HttpElevenLabsTranscriptionProvider,
@@ -92,6 +93,7 @@ _REEL_UI_HTML = """<!doctype html>
     .ghost { background: transparent; color: #ccdbff; border-color: #5371b7; }
     .ghost:hover { background: rgba(79, 124, 255, 0.12); }
     .ghost:disabled { background: transparent; }
+    .download-link.hidden { display: none; }
     .script-section { margin: 10px 0; }
     .script-section label { font-weight: 600; }
     .script-section [contenteditable] {
@@ -164,6 +166,38 @@ _REEL_UI_HTML = """<!doctype html>
       text-decoration: none;
     }
     .hook-source:hover { color: white; }
+    .asset-preview-shell {
+      width: min(100%, 420px);
+      aspect-ratio: 9 / 16;
+      margin: 14px auto 0;
+      border-radius: 16px;
+      overflow: hidden;
+      background: #000;
+      border: 1px solid rgba(83, 113, 183, 0.45);
+      box-shadow: inset 0 0 0 1px rgba(10, 15, 30, 0.4);
+    }
+    .asset-preview-shell video {
+      width: 100%;
+      height: 100%;
+      margin-top: 0;
+      border-radius: 0;
+      object-fit: cover;
+      background: #000;
+    }
+    .asset-preview-controls {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      margin-top: 10px;
+    }
+    .asset-links {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 16px;
+      margin-top: 12px;
+    }
     select {
       padding: 8px 10px;
       border: 1px solid var(--border);
@@ -212,6 +246,11 @@ _REEL_UI_HTML = """<!doctype html>
       <textarea id="roughIdea" placeholder="e.g. 5 productivity hacks that changed my life"></textarea>
       <div class="dictation-helper">Use your microphone to dictate your rough idea.</div>
       <div id="dictationStatus" class="status"></div>
+      <label>Example video (optional — style reference)</label>
+      <input type="file" id="exampleVideoFile" accept="video/*,audio/*" />
+      <button id="analyzeStyleBtn" type="button" class="ghost" disabled>Analyze Style</button>
+      <span id="styleStatus" class="status"></span>
+      <div id="stylePreview" style="display:none; margin-top:8px; padding:10px; border:1px solid var(--border); border-radius:8px; background:var(--panel-strong); font-size:13px; color:var(--muted); white-space:pre-wrap;"></div>
       <label>B-roll clips (5–6 videos, in order)</label>
       <input type="file" id="brollFiles" accept="video/*" multiple />
       <br />
@@ -251,17 +290,29 @@ _REEL_UI_HTML = """<!doctype html>
 
   <div class="step" id="assembleStep" style="display:none">
     <div class="card">
-      <h3>Step 4: Assemble Reel + Captions</h3>
-      <button id="assembleBtn" type="button">Assemble Reel + Captions</button>
+      <h3>Step 4: Prepare Download Assets</h3>
+      <button id="assembleBtn" type="button">Prepare B-roll + Captions</button>
+      <button id="exportPremiereBtn" type="button" class="ghost">Export Timeline to Premiere Pro</button>
       <span id="assembleStatus" class="status"></span>
-      <br />
-      <video id="finalReel" controls style="margin-top:10px"></video>
-      <br />
-      <a id="downloadReel" href="#" download="reel.mp4" style="color:var(--brand)">Download</a>
+      <div class="asset-preview-shell">
+        <video id="finalReel" preload="metadata" playsinline></video>
+      </div>
+      <div class="asset-preview-controls">
+        <button id="reelPreviewToggleBtn" type="button" class="ghost">Play Preview</button>
+        <span id="reelPreviewTime" class="status">0:00 / 0:00</span>
+      </div>
+      <div class="asset-links">
+        <a id="downloadReel" class="download-link hidden" href="#" download="reel.mp4" style="color:var(--brand)">Download B-roll Reel</a>
+        <a id="downloadCaptionsOverlay" class="download-link hidden" href="#" download="captions-overlay.mov" style="color:var(--brand)">Download Captions Overlay</a>
+      </div>
     </div>
   </div>
 
   <script>
+    const exampleVideoFile = document.getElementById("exampleVideoFile");
+    const analyzeStyleBtn = document.getElementById("analyzeStyleBtn");
+    const styleStatus = document.getElementById("styleStatus");
+    const stylePreview = document.getElementById("stylePreview");
     const voiceFiles = document.getElementById("voiceFiles");
     const voiceName = document.getElementById("voiceName");
     const cloneVoiceBtn = document.getElementById("cloneVoiceBtn");
@@ -287,17 +338,24 @@ _REEL_UI_HTML = """<!doctype html>
     const voiceoverAudio = document.getElementById("voiceoverAudio");
     const assembleStep = document.getElementById("assembleStep");
     const assembleBtn = document.getElementById("assembleBtn");
+    const exportPremiereBtn = document.getElementById("exportPremiereBtn");
     const assembleStatus = document.getElementById("assembleStatus");
     const finalReel = document.getElementById("finalReel");
+    const reelPreviewToggleBtn = document.getElementById("reelPreviewToggleBtn");
+    const reelPreviewTime = document.getElementById("reelPreviewTime");
     const downloadReel = document.getElementById("downloadReel");
+    const downloadCaptionsOverlay = document.getElementById("downloadCaptionsOverlay");
     const SpeechRecognitionCtor = window.SpeechRecognition || window.webkitSpeechRecognition;
 
+    let currentStyleNotes = null;
     let currentVoiceId = null;
     let currentScript = null;
     let currentHookSuggestions = [];
     let currentSelectedHookId = null;
     let currentSelectedHookText = null;
     let voiceoverBlob = null;
+    let reelObjectUrl = null;
+    let captionsOverlayObjectUrl = null;
     let speechRecognition = null;
     const dictationSupported = Boolean(SpeechRecognitionCtor);
     let dictationListening = false;
@@ -310,6 +368,18 @@ _REEL_UI_HTML = """<!doctype html>
     let dictationInternalInput = false;
     let dictationStopMessage = "";
     let dictationStopOk = undefined;
+
+    function fmtTime(sec) {
+      const total = Math.max(0, Math.floor(sec || 0));
+      const minutes = Math.floor(total / 60);
+      const seconds = total % 60;
+      return minutes + ":" + String(seconds).padStart(2, "0");
+    }
+
+    function updateReelPreviewTime() {
+      reelPreviewTime.textContent = fmtTime(finalReel.currentTime) + " / " + fmtTime(finalReel.duration);
+      reelPreviewToggleBtn.textContent = finalReel.paused ? "Play Preview" : "Pause Preview";
+    }
 
     function setStatus(el, msg, ok) {
       el.textContent = msg || "";
@@ -327,8 +397,36 @@ _REEL_UI_HTML = """<!doctype html>
       assembleStep.style.display = "none";
       voiceoverAudio.removeAttribute("src");
       finalReel.removeAttribute("src");
+      finalReel.pause();
+      finalReel.load();
+      updateReelPreviewTime();
       downloadReel.href = "#";
+      downloadReel.classList.add("hidden");
+      downloadCaptionsOverlay.href = "#";
+      downloadCaptionsOverlay.classList.add("hidden");
     }
+
+    reelPreviewToggleBtn.addEventListener("click", async () => {
+      if (!finalReel.getAttribute("src")) {
+        return;
+      }
+      if (finalReel.paused) {
+        try {
+          await finalReel.play();
+        } catch (_error) {
+          // Ignore autoplay/playback errors from the browser.
+        }
+      } else {
+        finalReel.pause();
+      }
+      updateReelPreviewTime();
+    });
+
+    finalReel.addEventListener("loadedmetadata", updateReelPreviewTime);
+    finalReel.addEventListener("timeupdate", updateReelPreviewTime);
+    finalReel.addEventListener("play", updateReelPreviewTime);
+    finalReel.addEventListener("pause", updateReelPreviewTime);
+    finalReel.addEventListener("ended", updateReelPreviewTime);
 
     function updateDictationButton() {
       if (!dictationSupported) {
@@ -641,6 +739,44 @@ _REEL_UI_HTML = """<!doctype html>
       startDictation();
     });
 
+    exampleVideoFile.addEventListener("change", () => {
+      if (exampleVideoFile.files?.length) {
+        analyzeStyleBtn.disabled = false;
+      } else {
+        analyzeStyleBtn.disabled = true;
+        currentStyleNotes = null;
+        stylePreview.style.display = "none";
+        setStatus(styleStatus, "");
+      }
+    });
+
+    analyzeStyleBtn.addEventListener("click", async () => {
+      const file = exampleVideoFile.files?.[0];
+      if (!file) {
+        setStatus(styleStatus, "Select an example video first", false);
+        return;
+      }
+      try {
+        analyzeStyleBtn.disabled = true;
+        setStatus(styleStatus, "Analyzing style...");
+        const fd = new FormData();
+        fd.append("file", file);
+        const r = await fetch("/v1/reel/analyze-example", { method: "POST", body: fd });
+        const data = await r.json();
+        if (data.error) throw new Error(data.error);
+        currentStyleNotes = data.style_notes;
+        stylePreview.textContent = data.style_notes;
+        stylePreview.style.display = "block";
+        setStatus(styleStatus, "Style captured", true);
+      } catch (e) {
+        currentStyleNotes = null;
+        stylePreview.style.display = "none";
+        setStatus(styleStatus, "Error: " + e.message, false);
+      } finally {
+        analyzeStyleBtn.disabled = !exampleVideoFile.files?.length;
+      }
+    });
+
     suggestHooksBtn.addEventListener("click", async () => {
       if (dictationListening) {
         stopDictation("Dictation stopped.", undefined);
@@ -702,7 +838,8 @@ _REEL_UI_HTML = """<!doctype html>
           body: JSON.stringify({
             rough_idea: idea,
             selected_hook_id: currentSelectedHookId,
-            clip_count: clipCount
+            clip_count: clipCount,
+            style_notes: currentStyleNotes
           }),
         });
         const data = await r.json();
@@ -775,25 +912,92 @@ _REEL_UI_HTML = """<!doctype html>
       }
       try {
         assembleBtn.disabled = true;
-        setStatus(assembleStatus, "Assembling...");
+        setStatus(assembleStatus, "Preparing download assets...");
+        if (reelObjectUrl) {
+          URL.revokeObjectURL(reelObjectUrl);
+          reelObjectUrl = null;
+        }
+        if (captionsOverlayObjectUrl) {
+          URL.revokeObjectURL(captionsOverlayObjectUrl);
+          captionsOverlayObjectUrl = null;
+        }
+        downloadReel.href = "#";
+        downloadReel.classList.add("hidden");
+        downloadCaptionsOverlay.href = "#";
+        downloadCaptionsOverlay.classList.add("hidden");
+
+        const reelFd = new FormData();
+        for (let i = 0; i < files.length; i++) reelFd.append("clips", files[i]);
+        reelFd.append("voiceover", voiceoverBlob, "voiceover.mp3");
+        reelFd.append("captions_enabled", "false");
+        const reelResponse = await fetch("/v1/reel/assemble", { method: "POST", body: reelFd });
+        if (!reelResponse.ok) {
+          const d = await reelResponse.json().catch(() => ({}));
+          throw new Error(d.error || reelResponse.statusText);
+        }
+        const reelBlob = await reelResponse.blob();
+        reelObjectUrl = URL.createObjectURL(reelBlob);
+        finalReel.src = reelObjectUrl;
+        finalReel.currentTime = 0;
+        finalReel.pause();
+        updateReelPreviewTime();
+        downloadReel.href = reelObjectUrl;
+        downloadReel.download = "reel.mp4";
+        downloadReel.classList.remove("hidden");
+
+        const captionsFd = new FormData();
+        captionsFd.append("voiceover", voiceoverBlob, "voiceover.mp3");
+        const captionsResponse = await fetch("/v1/reel/captions-overlay", { method: "POST", body: captionsFd });
+        if (!captionsResponse.ok) {
+          const d = await captionsResponse.json().catch(() => ({}));
+          throw new Error(d.error || captionsResponse.statusText);
+        }
+        const captionsBlob = await captionsResponse.blob();
+        captionsOverlayObjectUrl = URL.createObjectURL(captionsBlob);
+        downloadCaptionsOverlay.href = captionsOverlayObjectUrl;
+        downloadCaptionsOverlay.download = "captions-overlay.mov";
+        downloadCaptionsOverlay.classList.remove("hidden");
+        setStatus(assembleStatus, "B-roll reel and captions overlay are ready.", true);
+      } catch (e) {
+        setStatus(assembleStatus, "Error: " + e.message, false);
+      } finally {
+        assembleBtn.disabled = false;
+      }
+    });
+
+    exportPremiereBtn.addEventListener("click", async () => {
+      const files = brollFiles.files;
+      if (!files?.length) {
+        setStatus(assembleStatus, "Upload B-roll clips", false);
+        return;
+      }
+      if (!voiceoverBlob) {
+        setStatus(assembleStatus, "Generate voiceover first", false);
+        return;
+      }
+      try {
+        exportPremiereBtn.disabled = true;
+        setStatus(assembleStatus, "Preparing Premiere Pro timeline...");
         const fd = new FormData();
         for (let i = 0; i < files.length; i++) fd.append("clips", files[i]);
         fd.append("voiceover", voiceoverBlob, "voiceover.mp3");
-        fd.append("captions_enabled", "true");
-        const r = await fetch("/v1/reel/assemble", { method: "POST", body: fd });
+        const r = await fetch("/v1/reel/export-premiere", { method: "POST", body: fd });
         if (!r.ok) {
           const d = await r.json().catch(() => ({}));
           throw new Error(d.error || r.statusText);
         }
         const blob = await r.blob();
-        finalReel.src = URL.createObjectURL(blob);
-        downloadReel.href = finalReel.src;
-        downloadReel.download = "reel.mp4";
-        setStatus(assembleStatus, "Reel ready", true);
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = "reel-premiere.xml";
+        a.click();
+        URL.revokeObjectURL(url);
+        setStatus(assembleStatus, "Premiere Pro timeline downloaded. Relink the source clips in Premiere if prompted.", true);
       } catch (e) {
         setStatus(assembleStatus, "Error: " + e.message, false);
       } finally {
-        assembleBtn.disabled = false;
+        exportPremiereBtn.disabled = false;
       }
     });
   </script>
@@ -854,6 +1058,45 @@ async def suggest_hooks(body: dict = Body(...)) -> JSONResponse:
         return JSONResponse({"error": str(exc)}, status_code=400)
 
 
+@router.post("/v1/reel/analyze-example")
+async def analyze_example(
+    file: UploadFile = File(...),
+) -> JSONResponse:
+    """Analyze an example video's script style for use in script generation."""
+    settings = get_settings()
+    if not settings.mistral_api_key:
+        return JSONResponse({"error": "Mistral API key not configured"}, status_code=503)
+
+    temp_dir = tempfile.mkdtemp()
+    try:
+        suffix = Path(file.filename or "video").suffix or ".mp4"
+        video_path = Path(temp_dir) / f"example{suffix}"
+        video_path.write_bytes(await file.read())
+
+        wav_path = Path(temp_dir) / "example.wav"
+        media_proc = FfmpegMediaProcessor()
+        media_proc.normalize_to_wav(video_path, wav_path)
+
+        stt = _reel_caption_transcription_provider(settings)
+        transcription = stt.transcribe(wav_path, None)
+
+        full_text = " ".join(seg.text for seg in transcription.segments).strip()
+        if not full_text:
+            return JSONResponse({"error": "No speech detected in the example video"}, status_code=400)
+
+        provider = MistralReelScriptProvider(settings)
+        style_notes = provider.analyze_example_style(full_text)
+
+        return JSONResponse({"style_notes": style_notes, "example_transcript": full_text})
+    except TranscriptionProviderError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except LLMProviderError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    finally:
+        import shutil
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
 @router.post("/v1/reel/generate-script")
 async def generate_script(body: dict = Body(...)) -> JSONResponse:
     """Generate a viral reel script from rough idea using Mistral."""
@@ -863,6 +1106,7 @@ async def generate_script(body: dict = Body(...)) -> JSONResponse:
     rough_idea = body.get("rough_idea", "").strip()
     selected_hook_id = body.get("selected_hook_id", "").strip()
     clip_count = int(body.get("clip_count", 5))
+    style_notes = (body.get("style_notes") or "").strip() or None
     if not rough_idea:
         return JSONResponse({"error": "rough_idea is required"}, status_code=400)
     if not selected_hook_id:
@@ -873,7 +1117,7 @@ async def generate_script(body: dict = Body(...)) -> JSONResponse:
         if selected_hook is None:
             return JSONResponse({"error": "selected_hook_id was not found"}, status_code=400)
         provider = MistralReelScriptProvider(settings)
-        script = provider.generate_reel_script(rough_idea, selected_hook, clip_count)
+        script = provider.generate_reel_script(rough_idea, selected_hook, clip_count, style_notes=style_notes)
         return JSONResponse(script.model_dump())
     except HookCatalogError as exc:
         return JSONResponse({"error": str(exc)}, status_code=503)
@@ -937,6 +1181,191 @@ async def generate_voiceover(body: dict = Body(...)):
         return JSONResponse({"error": str(e)}, status_code=400)
 
 
+def _auto_cut_window_for_duration(
+    duration: float,
+    *,
+    target_duration: float = 5.0,
+    max_duration: float = 7.0,
+) -> tuple[float, float]:
+    if duration <= max_duration:
+        return 0.0, max(0.0, duration)
+
+    start = max(0.0, (duration - target_duration) / 2)
+    end = min(duration, start + target_duration)
+    return start, end
+
+
+@router.post("/v1/reel/export-premiere", response_model=None)
+async def export_reel_to_premiere(
+    clips: list[UploadFile] = File(..., alias="clips"),
+    voiceover: UploadFile = File(...),
+):
+    """Export a relinkable Premiere Pro timeline for the reel workflow."""
+    if not clips:
+        return JSONResponse({"error": "At least one clip is required"}, status_code=400)
+
+    media_proc = FfmpegMediaProcessor()
+    temp_dir = tempfile.mkdtemp()
+    clip_paths: list[Path] = []
+    voiceover_path: Path | None = None
+
+    try:
+        for index, clip in enumerate(clips):
+            suffix = Path(clip.filename or "clip").suffix or ".mp4"
+            path = Path(temp_dir) / f"clip_{index}{suffix}"
+            path.write_bytes(await clip.read())
+            clip_paths.append(path)
+
+        voiceover_suffix = Path(voiceover.filename or "voiceover").suffix or ".mp3"
+        voiceover_path = Path(temp_dir) / f"voiceover{voiceover_suffix}"
+        voiceover_path.write_bytes(await voiceover.read())
+
+        audio_duration = float(media_proc._probe_duration(voiceover_path))
+        if audio_duration <= 0:
+            return JSONResponse({"error": "Voiceover duration must be greater than zero"}, status_code=400)
+
+        usable_clips: list[tuple[str, float, float, float, float]] = []
+        for clip, clip_path in zip(clips, clip_paths, strict=False):
+            source_duration = float(media_proc._probe_duration(clip_path))
+            if source_duration <= 0:
+                continue
+            source_in, source_out = _auto_cut_window_for_duration(source_duration)
+            trimmed_duration = max(0.0, source_out - source_in)
+            if trimmed_duration <= 0:
+                continue
+            usable_clips.append(
+                (
+                    Path(clip.filename or clip_path.name).name,
+                    source_duration,
+                    source_in,
+                    source_out,
+                    trimmed_duration,
+                )
+            )
+
+        if not usable_clips:
+            return JSONResponse({"error": "No clips with usable duration"}, status_code=400)
+
+        sequence_cursor = 0.0
+        video_clips: list[PremiereClip] = []
+        clip_index = 0
+        while sequence_cursor < audio_duration:
+            media_name, source_duration, source_in, source_out, trimmed_duration = usable_clips[
+                clip_index % len(usable_clips)
+            ]
+            remaining_duration = audio_duration - sequence_cursor
+            clip_duration = min(trimmed_duration, remaining_duration)
+            video_clips.append(
+                PremiereClip(
+                    name=f"Clip {clip_index + 1}",
+                    media_name=media_name,
+                    sequence_start_s=sequence_cursor,
+                    sequence_end_s=sequence_cursor + clip_duration,
+                    source_in_s=source_in,
+                    source_out_s=min(source_out, source_in + clip_duration),
+                    source_duration_s=source_duration,
+                )
+            )
+            sequence_cursor += clip_duration
+            clip_index += 1
+
+        audio_clips = [
+            PremiereClip(
+                name="Voiceover",
+                media_name=Path(voiceover.filename or voiceover_path.name).name,
+                sequence_start_s=0.0,
+                sequence_end_s=audio_duration,
+                source_in_s=0.0,
+                source_out_s=audio_duration,
+                source_duration_s=audio_duration,
+            )
+        ]
+        xml_bytes = build_premiere_xml(
+            "AIEdit Reel",
+            video_clips,
+            audio_clips=audio_clips,
+            width=1080,
+            height=1920,
+        )
+        return Response(
+            content=xml_bytes,
+            media_type="application/xml",
+            headers={"Content-Disposition": 'attachment; filename="reel-premiere.xml"'},
+        )
+    except RuntimeError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    finally:
+        import shutil
+
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+@router.post("/v1/reel/captions-overlay", response_model=None)
+async def render_reel_captions_overlay(
+    voiceover: UploadFile = File(...),
+):
+    """Render a standalone captions-only overlay video for the generated voiceover."""
+    settings = get_settings()
+    if not settings.elevenlabs_reel_api_key:
+        return JSONResponse({"error": "ElevenLabs API key not configured"}, status_code=503)
+
+    media_proc = FfmpegMediaProcessor()
+    temp_dir = tempfile.mkdtemp()
+    voiceover_path: Path | None = None
+    subtitle_path = Path(temp_dir) / "captions.ass"
+    overlay_path = Path(temp_dir) / "captions-overlay.mov"
+
+    try:
+        voiceover_suffix = Path(voiceover.filename or "voiceover").suffix or ".mp3"
+        voiceover_path = Path(temp_dir) / f"voiceover{voiceover_suffix}"
+        voiceover_path.write_bytes(await voiceover.read())
+
+        try:
+            transcription = _reel_caption_transcription_provider(settings).transcribe(voiceover_path, None)
+        except (TranscriptionProviderError, RuntimeError) as exc:
+            raise RuntimeError(f"Caption transcription failed: {exc}") from exc
+
+        render_options = default_caption_render_options(
+            frame_width=1080,
+            frame_height=1920,
+            font_path=settings.caption_font_path,
+            font_name=settings.caption_font_name,
+            font_size=52,
+        )
+        cues = segments_to_caption_cues(transcription.segments, render_options)
+        if not cues:
+            raise RuntimeError("No usable caption cues were produced")
+
+        write_ass_subtitles(cues, subtitle_path, render_options)
+        overlay_duration = max(
+            float(media_proc._probe_duration(voiceover_path)),
+            max((cue.end_ms for cue in cues), default=0) / 1000.0,
+        )
+        media_proc.render_caption_overlay_video(
+            subtitle_path,
+            overlay_path,
+            overlay_duration,
+            render_options,
+        )
+
+        def cleanup():
+            import shutil
+
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+        return FileResponse(
+            str(overlay_path),
+            media_type="video/quicktime",
+            filename="captions-overlay.mov",
+            background=BackgroundTask(cleanup),
+        )
+    except Exception as e:
+        import shutil
+
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        return JSONResponse({"error": _compact_reel_error(e)}, status_code=400)
+
+
 @router.post("/v1/reel/assemble", response_model=None)
 async def assemble_reel(
     clips: list[UploadFile] = File(..., alias="clips"),
@@ -975,7 +1404,7 @@ async def assemble_reel(
             media_proc.auto_cut_clip(p, out, target_duration=5.0, max_duration=7.0)
             trimmed_paths.append(out)
 
-        media_proc.concat_clips_with_audio(trimmed_paths, voiceover_path, output_path)
+        media_proc.concat_clips_with_audio(trimmed_paths, voiceover_path, output_path, apply_rotation=False)
         final_output_path = output_path
 
         if captions_enabled:
@@ -995,7 +1424,7 @@ async def assemble_reel(
             if not cues:
                 raise RuntimeError("No usable caption cues were produced")
 
-            media_proc.write_ass_subtitles(cues, subtitle_path, render_options)
+            write_ass_subtitles(cues, subtitle_path, render_options)
             media_proc.burn_subtitles_into_video(output_path, subtitle_path, captioned_output_path, render_options)
             final_output_path = captioned_output_path
 
