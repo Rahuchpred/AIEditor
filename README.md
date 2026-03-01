@@ -20,6 +20,8 @@ Backend API for asynchronous media transcription from uploaded audio/video.
 2. Copy `.env.example` to `.env` and set real provider credentials.
    The app accepts both docs-style keys and `AIEDIT_` aliases:
    - ElevenLabs (required): `ELEVENLABS_API_KEY` or `AIEDIT_ELEVENLABS_API_KEY`
+   - Optional reel voice key: `ELEVENLABS_VOICE_API_KEY` or `AIEDIT_ELEVENLABS_VOICE_API_KEY`
+     Use this if you want a different ElevenLabs key for instant voice cloning, voice listing, and TTS.
    - Mistral (optional / not used in transcript-only mode): `MISTRAL_API_KEY` or `AIEDIT_MISTRAL_API_KEY`
    Optional overrides:
    - `AIEDIT_ELEVENLABS_API_URL`, `ELEVENLABS_MODEL_ID`/`AIEDIT_ELEVENLABS_MODEL_ID`
@@ -44,3 +46,9 @@ Use `docker-compose.yml` only if you want the original Postgres + Redis + S3-com
 - Results: 30 days
 
 Retention cleanup is not automated in this MVP. It should be enforced by object storage lifecycle rules.
+
+## W&B MCP
+
+This repo can use the W&B MCP server as a prompt-analysis and evaluation tool for script quality work. It is not part of the FastAPI request path; it is a Codex-side analysis tool for comparing prompt versions, runs, and traces.
+
+Setup and workflow notes are in [docs/wandb-mcp.md](/Users/rahazh/Documents/coding/AIEdit/docs/wandb-mcp.md).

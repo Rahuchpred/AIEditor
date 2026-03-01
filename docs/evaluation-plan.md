@@ -14,3 +14,14 @@ For each sample, verify:
 - The rewrite is a single English string
 - Exactly three speaking tips are returned
 - Timestamps are preserved when enabled
+
+## Prompt Evaluation With W&B MCP
+
+Use W&B MCP as the analysis layer for prompt experiments, especially for reel-script quality:
+
+- version each prompt change
+- record the prompt inputs and outputs
+- tag outputs that sound generic, repetitive, or strong
+- compare regeneration rate and manual edits across prompt versions
+
+Project usage notes are in [docs/wandb-mcp.md](/Users/rahazh/Documents/coding/AIEdit/docs/wandb-mcp.md).
