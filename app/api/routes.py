@@ -8,7 +8,13 @@ from fastapi import APIRouter, File, Form, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from starlette.background import BackgroundTask
 
-from app.captions import default_caption_render_options, remap_cues_after_cuts, segments_to_caption_cues
+from app.captions import (
+    default_caption_render_options,
+    remap_cues_after_cuts,
+    segments_to_caption_cues,
+    segments_to_raw_cues,
+    shape_caption_cues,
+)
 from app.container import get_container
 from app.media import FfmpegMediaProcessor
 from app.providers import TranscriptionProviderError
@@ -25,6 +31,19 @@ def _service_from_request(request: Request):
 def _transcription_provider_from_request(request: Request):
     container = getattr(request.app.state, "container", None) or get_container()
     return container.transcription_provider
+
+
+def _caption_options_for_video(media_proc, file_path: Path, *, font_path: str, font_name: str):
+    geometry_probe = getattr(media_proc, "probe_video_geometry", None)
+    geometry = geometry_probe(file_path) if callable(geometry_probe) else None
+    frame_width = geometry.display_width if geometry is not None else 1920
+    frame_height = geometry.display_height if geometry is not None else 1080
+    return default_caption_render_options(
+        frame_width=frame_width,
+        frame_height=frame_height,
+        font_path=font_path,
+        font_name=font_name,
+    )
 
 
 @router.get("/healthz")
@@ -137,6 +156,12 @@ def ui_playground() -> str:
       border-radius: 8px;
       overflow: hidden;
       border: 1px solid #22345d;
+    }
+    .preview-wrap.portrait-preview {
+      aspect-ratio: 9 / 16;
+      max-width: 420px;
+      margin-left: auto;
+      margin-right: auto;
     }
     .preview-video {
       width: 100%;
@@ -326,10 +351,10 @@ def ui_playground() -> str:
     </div>
   </div>
 
-  <div class="card">
+    <div class="card">
     <h3>Response</h3>
     <div id="previewPanel">
-      <div class="preview-wrap">
+      <div id="previewWrap" class="preview-wrap">
         <video id="previewVideo" class="preview-video" preload="metadata"></video>
         <div id="previewPlaceholder" class="preview-placeholder">No video loaded</div>
       </div>
@@ -354,7 +379,7 @@ def ui_playground() -> str:
   <div id="autoCutCard" class="card">
     <h3>Auto-Cut Result</h3>
     <div id="autoCutInfo" class="autocut-info"></div>
-    <div class="preview-wrap">
+    <div id="autoCutWrap" class="preview-wrap">
       <video id="autoCutVideo" class="preview-video" controls preload="metadata"></video>
     </div>
   </div>
@@ -365,6 +390,7 @@ def ui_playground() -> str:
 
     // --- Video Preview Panel ---
     const previewPanel = document.getElementById("previewPanel");
+    const previewWrap = document.getElementById("previewWrap");
     const previewVideo = document.getElementById("previewVideo");
     const previewPlaceholder = document.getElementById("previewPlaceholder");
     const playPauseBtn = document.getElementById("playPauseBtn");
@@ -376,6 +402,12 @@ def ui_playground() -> str:
       const s = Math.max(0, Math.floor(sec));
       const m = Math.floor(s / 60);
       return m + ":" + String(s % 60).padStart(2, "0");
+    }
+
+    function updatePreviewOrientation(videoEl, wrapEl) {
+      if (!videoEl || !wrapEl) return;
+      const isPortrait = (videoEl.videoHeight || 0) > (videoEl.videoWidth || 0);
+      wrapEl.classList.toggle("portrait-preview", isPortrait);
     }
 
     function updateTimeDisplay() {
@@ -395,10 +427,12 @@ def ui_playground() -> str:
         previewObjectUrl = URL.createObjectURL(file);
         previewVideo.src = previewObjectUrl;
         previewVideo.load();
+        previewWrap.classList.remove("portrait-preview");
         previewPlaceholder.style.display = "none";
         previewPanel.classList.add("visible");
       } else {
         previewVideo.removeAttribute("src");
+        previewWrap.classList.remove("portrait-preview");
         previewPlaceholder.style.display = "";
         previewPanel.classList.remove("visible");
       }
@@ -406,6 +440,7 @@ def ui_playground() -> str:
 
     previewVideo.addEventListener("loadedmetadata", function () {
       previewState.duration = previewVideo.duration || 0;
+      updatePreviewOrientation(previewVideo, previewWrap);
       updateTimeDisplay();
     });
 
@@ -569,6 +604,7 @@ def ui_playground() -> str:
     // --- Auto-Cut ---
     const autoCutBtn = document.getElementById("autoCutBtn");
     const autoCutCard = document.getElementById("autoCutCard");
+    const autoCutWrap = document.getElementById("autoCutWrap");
     const autoCutVideo = document.getElementById("autoCutVideo");
     const autoCutInfo = document.getElementById("autoCutInfo");
     let detectedCutRegions = [];
@@ -580,8 +616,13 @@ def ui_playground() -> str:
       tlContainer.querySelectorAll(".tl-cut-region").forEach(function (el) { el.remove(); });
       if (autoCutObjectUrl) { URL.revokeObjectURL(autoCutObjectUrl); autoCutObjectUrl = null; }
       autoCutVideo.removeAttribute("src");
+      autoCutWrap.classList.remove("portrait-preview");
       autoCutCard.classList.remove("visible");
     }
+
+    autoCutVideo.addEventListener("loadedmetadata", function () {
+      updatePreviewOrientation(autoCutVideo, autoCutWrap);
+    });
 
     document.getElementById("media_file").addEventListener("change", clearCutRegions);
 
@@ -914,13 +955,22 @@ async def auto_cut(
         final_output_path = Path(output_tmp.name)
         if captions_enabled:
             service = _service_from_request(request)
+            render_options = _caption_options_for_video(
+                _media_proc,
+                Path(output_tmp.name),
+                font_path=service._settings.caption_font_path,
+                font_name=service._settings.caption_font_name,
+            )
             cues = []
             if job_id:
                 try:
                     result = service.get_result(job_id)
-                    cues = remap_cues_after_cuts(
-                        segments_to_caption_cues(result.transcript.segments),
-                        cuts,
+                    cues = shape_caption_cues(
+                        remap_cues_after_cuts(
+                            segments_to_raw_cues(result.transcript.segments),
+                            cuts,
+                        ),
+                        render_options,
                     )
                 except Exception:
                     cues = []
@@ -933,18 +983,11 @@ async def auto_cut(
                     )
                 except (TranscriptionProviderError, RuntimeError) as exc:
                     raise RuntimeError(f"Caption transcription failed: {exc}") from exc
-                cues = segments_to_caption_cues(transcription.segments)
+                cues = segments_to_caption_cues(transcription.segments, render_options)
 
             if not cues:
                 raise RuntimeError("No usable caption cues were produced")
 
-            render_options = default_caption_render_options(
-                font_path=service._settings.caption_font_path,
-                font_name=service._settings.caption_font_name,
-                font_size=34,
-                bottom_margin=48,
-                max_chars_per_line=36,
-            )
             _media_proc.write_ass_subtitles(cues, Path(subtitle_tmp.name), render_options)
             _media_proc.burn_subtitles_into_video(
                 Path(output_tmp.name),
