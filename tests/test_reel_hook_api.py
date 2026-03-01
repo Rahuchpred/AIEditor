@@ -95,6 +95,11 @@ def test_reel_generator_ui_includes_dictation_controls():
     html = response.text
     assert 'id="roughIdeaDictationBtn"' in html
     assert 'id="dictationStatus"' in html
+    assert "Export Timeline to Premiere Pro" in html
+    assert 'id="downloadCaptionsOverlay"' in html
+    assert 'id="reelPreviewToggleBtn"' in html
+    assert 'id="reelPreviewTime"' in html
+    assert "Prepare B-roll + Captions" in html
     assert "window.SpeechRecognition || window.webkitSpeechRecognition" in html
     assert "Speech dictation is not available in this browser." in html
 
@@ -114,7 +119,7 @@ def test_generate_script_uses_selected_hook(monkeypatch, tmp_path):
     hooks_path = _make_hooks_file(tmp_path)
     monkeypatch.setattr("app.api.reel_routes.get_settings", lambda: _settings(hooks_path))
 
-    def fake_generate(self, rough_idea, selected_hook, clip_count):
+    def fake_generate(self, rough_idea, selected_hook, clip_count, style_notes=None):
         assert selected_hook.id == "hook_0002"
         return ReelScript(
             hook="Custom hook",

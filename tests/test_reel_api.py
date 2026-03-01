@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from unittest.mock import MagicMock
+
 from fastapi.testclient import TestClient
 
 from app.main import create_app
-from app.schemas import VideoGeometry
+from app.schemas import TimedTextSegment, TranscriptionResult
 
 
 def test_assemble_reel_returns_video_response(monkeypatch):
@@ -16,8 +18,8 @@ def test_assemble_reel_returns_video_response(monkeypatch):
             self.auto_cut_calls.append((input_path, output_path, target_duration, max_duration))
             output_path.write_bytes(b"trimmed")
 
-        def concat_clips_with_audio(self, clip_paths, audio_path, output_path):
-            self.concat_calls.append((list(clip_paths), audio_path))
+        def concat_clips_with_audio(self, clip_paths, audio_path, output_path, *, apply_rotation=True):
+            self.concat_calls.append((list(clip_paths), audio_path, apply_rotation))
             output_path.write_bytes(b"video-bytes")
 
     processor = FakeProcessor()
@@ -40,6 +42,39 @@ def test_assemble_reel_returns_video_response(monkeypatch):
     assert len(processor.auto_cut_calls) == 2
     assert len(processor.concat_calls) == 1
     assert len(processor.concat_calls[0][0]) == 2
+    assert processor.concat_calls[0][2] is False
+
+
+def test_export_reel_to_premiere_returns_xml(monkeypatch):
+    class FakeProcessor:
+        def _probe_duration(self, file_path):
+            name = file_path.name
+            if "voiceover" in name:
+                return 11.0
+            if "clip_0" in name:
+                return 8.0
+            if "clip_1" in name:
+                return 4.0
+            return 5.0
+
+    monkeypatch.setattr("app.api.reel_routes.FfmpegMediaProcessor", FakeProcessor)
+
+    with TestClient(create_app()) as client:
+        response = client.post(
+            "/v1/reel/export-premiere",
+            files=[
+                ("clips", ("clip0.mp4", b"clip-0", "video/mp4")),
+                ("clips", ("clip1.mp4", b"clip-1", "video/mp4")),
+                ("voiceover", ("voiceover.mp3", b"voiceover", "audio/mpeg")),
+            ],
+        )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/xml")
+    assert '<xmeml version="5">' in response.text
+    assert response.text.count("clip0.mp4") >= 2
+    assert "clip1.mp4" in response.text
+    assert "voiceover.mp3" in response.text
 
 
 def test_assemble_reel_returns_compact_error_message(monkeypatch):
@@ -56,7 +91,7 @@ def test_assemble_reel_returns_compact_error_message(monkeypatch):
         def auto_cut_clip(self, input_path, output_path, target_duration=5.0, max_duration=7.0):
             output_path.write_bytes(b"trimmed")
 
-        def concat_clips_with_audio(self, clip_paths, audio_path, output_path):
+        def concat_clips_with_audio(self, clip_paths, audio_path, output_path, *, apply_rotation=True):
             raise RuntimeError(verbose_error)
 
     monkeypatch.setattr("app.api.reel_routes.FfmpegMediaProcessor", FakeProcessor)
@@ -84,33 +119,18 @@ def test_assemble_reel_with_captions_transcribes_and_burns(monkeypatch):
         def __init__(self):
             self.auto_cut_calls = []
             self.concat_calls = []
-            self.subtitle_writes = []
-            self.subtitle_burns = []
+            self.caption_burns = []
 
         def auto_cut_clip(self, input_path, output_path, target_duration=5.0, max_duration=7.0):
             self.auto_cut_calls.append((input_path, output_path, target_duration, max_duration))
             output_path.write_bytes(b"trimmed")
 
-        def concat_clips_with_audio(self, clip_paths, audio_path, output_path):
-            self.concat_calls.append((list(clip_paths), audio_path))
+        def concat_clips_with_audio(self, clip_paths, audio_path, output_path, *, apply_rotation=True):
+            self.concat_calls.append((list(clip_paths), audio_path, apply_rotation))
             output_path.write_bytes(b"video-bytes")
 
-        def probe_video_geometry(self, path):
-            return VideoGeometry(
-                encoded_width=1080,
-                encoded_height=1920,
-                rotation_degrees=0,
-                display_width=1080,
-                display_height=1920,
-                is_portrait_display=True,
-            )
-
-        def write_ass_subtitles(self, cues, output_path, options):
-            self.subtitle_writes.append((list(cues), output_path, options))
-            output_path.write_text("ass", encoding="utf-8")
-
         def burn_subtitles_into_video(self, input_video_path, subtitle_path, output_path, options):
-            self.subtitle_burns.append((input_video_path, subtitle_path, output_path, options))
+            self.caption_burns.append((input_video_path, subtitle_path, output_path, options))
             output_path.write_bytes(b"captioned-video-bytes")
 
     class FakeTranscriptionProvider:
@@ -119,13 +139,7 @@ def test_assemble_reel_with_captions_transcribes_and_burns(monkeypatch):
 
             return TranscriptionResult(
                 language_detected="en",
-                segments=[
-                    TimedTextSegment(
-                        start_ms=0,
-                        end_ms=1600,
-                        text="one of these six hooks is the one you should use",
-                    )
-                ],
+                segments=[TimedTextSegment(start_ms=0, end_ms=1000, text="Caption line")],
             )
 
     processor = FakeProcessor()
@@ -147,10 +161,163 @@ def test_assemble_reel_with_captions_transcribes_and_burns(monkeypatch):
 
     assert response.status_code == 200
     assert response.content == b"captioned-video-bytes"
-    assert len(processor.subtitle_writes) == 1
-    assert len(processor.subtitle_burns) == 1
-    cues, _output_path, options = processor.subtitle_writes[0]
-    assert options.max_chars_per_line == 22
-    assert options.bottom_margin == 461
-    assert cues[0].text.split("\n")[0] == "one of these six hooks"
-    assert all(len(line) <= 22 for cue in cues for line in cue.text.split("\n"))
+    assert len(processor.caption_burns) == 1
+    assert processor.concat_calls[0][2] is False
+    options = processor.caption_burns[0][3]
+    assert options.alignment == 2
+    assert options.play_res_x == 1080
+    assert options.play_res_y == 1920
+
+
+def test_render_reel_captions_overlay_returns_video_response(monkeypatch):
+    class FakeProcessor:
+        def __init__(self):
+            self.overlay_calls = []
+
+        def _probe_duration(self, file_path):
+            return 3.5
+
+        def render_caption_overlay_video(self, subtitle_path, output_path, duration_seconds, options, fps=30):
+            self.overlay_calls.append((subtitle_path, output_path, duration_seconds, options, fps))
+            output_path.write_bytes(b"overlay-video-bytes")
+
+    class FakeTranscriptionProvider:
+        def transcribe(self, audio_path, language_hint):
+            return TranscriptionResult(
+                language_detected="en",
+                segments=[TimedTextSegment(start_ms=0, end_ms=1200, text="Caption line")],
+            )
+
+    processor = FakeProcessor()
+    monkeypatch.setattr("app.api.reel_routes.FfmpegMediaProcessor", lambda: processor)
+    monkeypatch.setattr(
+        "app.api.reel_routes._reel_caption_transcription_provider",
+        lambda settings: FakeTranscriptionProvider(),
+    )
+
+    with TestClient(create_app()) as client:
+        response = client.post(
+            "/v1/reel/captions-overlay",
+            files=[("voiceover", ("voiceover.mp3", b"voiceover", "audio/mpeg"))],
+        )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("video/quicktime")
+    assert response.content == b"overlay-video-bytes"
+    assert len(processor.overlay_calls) == 1
+    _subtitle_path, _output_path, duration_seconds, options, fps = processor.overlay_calls[0]
+    assert duration_seconds == 3.5
+    assert options.play_res_x == 1080
+    assert options.play_res_y == 1920
+    assert fps == 30
+
+
+def test_analyze_example_extracts_style(monkeypatch):
+    """POST /v1/reel/analyze-example returns style_notes from example video."""
+
+    class FakeProcessor:
+        def normalize_to_wav(self, input_path, output_path):
+            output_path.write_bytes(b"fake-wav")
+
+    class FakeSTT:
+        def transcribe(self, audio_path, language_hint):
+            return TranscriptionResult(
+                language_detected="en",
+                segments=[TimedTextSegment(start_ms=0, end_ms=5000, text="Hello world example speech.")],
+            )
+
+    class FakeScriptProvider:
+        def __init__(self, settings):
+            pass
+
+        def analyze_example_style(self, transcript):
+            assert "Hello world" in transcript
+            return "Energetic, punchy, short sentences."
+
+    monkeypatch.setattr("app.api.reel_routes.FfmpegMediaProcessor", FakeProcessor)
+    monkeypatch.setattr("app.api.reel_routes._reel_caption_transcription_provider", lambda s: FakeSTT())
+    monkeypatch.setattr("app.api.reel_routes.MistralReelScriptProvider", FakeScriptProvider)
+
+    with TestClient(create_app()) as client:
+        response = client.post(
+            "/v1/reel/analyze-example",
+            files=[("file", ("example.mp4", b"fake-video", "video/mp4"))],
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["style_notes"] == "Energetic, punchy, short sentences."
+    assert "Hello world" in data["example_transcript"]
+
+
+def test_analyze_example_returns_error_when_no_speech(monkeypatch):
+    """POST /v1/reel/analyze-example returns 400 when no speech is detected."""
+
+    class FakeProcessor:
+        def normalize_to_wav(self, input_path, output_path):
+            output_path.write_bytes(b"fake-wav")
+
+    class FakeSTT:
+        def transcribe(self, audio_path, language_hint):
+            return TranscriptionResult(language_detected="en", segments=[])
+
+    monkeypatch.setattr("app.api.reel_routes.FfmpegMediaProcessor", FakeProcessor)
+    monkeypatch.setattr("app.api.reel_routes._reel_caption_transcription_provider", lambda s: FakeSTT())
+
+    with TestClient(create_app()) as client:
+        response = client.post(
+            "/v1/reel/analyze-example",
+            files=[("file", ("example.mp4", b"fake-video", "video/mp4"))],
+        )
+
+    assert response.status_code == 400
+    assert "No speech" in response.json()["error"]
+
+
+def test_generate_script_passes_style_notes(monkeypatch):
+    """POST /v1/reel/generate-script forwards style_notes to the provider."""
+    captured_style_notes = {}
+
+    original_generate = None
+
+    class FakeScriptProvider:
+        def __init__(self, settings):
+            pass
+
+        def generate_reel_script(self, rough_idea, selected_hook, clip_count, style_notes=None):
+            captured_style_notes["value"] = style_notes
+            from app.schemas import ReelScript
+
+            return ReelScript(
+                hook="Hook",
+                body=["Body"],
+                cta="CTA",
+                full_narration="Hook Body CTA",
+                hashtags=["#test"],
+            )
+
+    class FakeCatalog:
+        def shortlist(self, *a, **kw):
+            return []
+
+        def get_hook(self, hook_id):
+            from app.schemas import HookTemplate
+
+            return HookTemplate(id=hook_id, hook_text="Test hook", source_url=None, page_number=0, section=None)
+
+    monkeypatch.setattr("app.api.reel_routes.MistralReelScriptProvider", FakeScriptProvider)
+    monkeypatch.setattr("app.api.reel_routes.get_hook_catalog_service", lambda path: FakeCatalog())
+
+    with TestClient(create_app()) as client:
+        response = client.post(
+            "/v1/reel/generate-script",
+            json={
+                "rough_idea": "5 productivity hacks",
+                "selected_hook_id": "hook-1",
+                "clip_count": 3,
+                "style_notes": "Conversational, warm, uses rhetorical questions.",
+            },
+        )
+
+    assert response.status_code == 200
+    assert captured_style_notes["value"] == "Conversational, warm, uses rhetorical questions."
