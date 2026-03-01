@@ -127,6 +127,15 @@ class CaptionCue(BaseModel):
     text: str
 
 
+class VideoGeometry(BaseModel):
+    encoded_width: int
+    encoded_height: int
+    rotation_degrees: int
+    display_width: int
+    display_height: int
+    is_portrait_display: bool
+
+
 class CaptionRenderOptions(BaseModel):
     font_path: str
     font_name: str
@@ -134,9 +143,14 @@ class CaptionRenderOptions(BaseModel):
     primary_color: str
     outline_color: str
     outline_width: int
+    alignment: int = 2
+    margin_left: int = 40
+    margin_right: int = 40
     bottom_margin: int
     max_chars_per_line: int
     max_lines: int
+    soft_wrap_threshold: int = 28
+    soft_wrap_increment_limit: int = 6
 
 
 class ReelScriptRequest(BaseModel):

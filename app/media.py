@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import shutil
 import subprocess
@@ -11,7 +12,7 @@ from app.captions import write_ass_subtitles
 from app.constants import SUPPORTED_MEDIA_TYPES
 from app.errors import ServiceError
 from app.constants import ErrorCode
-from app.schemas import CaptionCue, CaptionRenderOptions, MediaInfo
+from app.schemas import CaptionCue, CaptionRenderOptions, MediaInfo, VideoGeometry
 
 
 class MediaProcessor(Protocol):
@@ -62,6 +63,9 @@ class FfmpegMediaProcessor:
         if completed.returncode != 0:
             raise RuntimeError(completed.stderr.strip() or "ffmpeg failed to normalize media")
 
+    def probe_video_geometry(self, file_path: Path) -> VideoGeometry | None:
+        return self._probe_video_geometry(file_path)
+
     def detect_silence(
         self,
         file_path: Path,
@@ -92,12 +96,14 @@ class FfmpegMediaProcessor:
         if not keep_ranges:
             raise RuntimeError("No segments to keep")
 
+        rotation_steps = self._rotation_filter_steps(input_path)
         n = len(keep_ranges)
         filter_parts: list[str] = []
         concat_inputs = ""
         for i, (start, end) in enumerate(keep_ranges):
+            video_chain = [f"trim=start={start}:end={end}", "setpts=PTS-STARTPTS", *rotation_steps]
             filter_parts.append(
-                f"[0:v]trim=start={start}:end={end},setpts=PTS-STARTPTS[v{i}];"
+                f"[0:v]{','.join(video_chain)}[v{i}];"
                 f"[0:a]atrim=start={start}:end={end},asetpts=PTS-STARTPTS[a{i}];"
             )
             concat_inputs += f"[v{i}][a{i}]"
@@ -110,6 +116,7 @@ class FfmpegMediaProcessor:
             "-map", "[outv]", "-map", "[outa]",
             "-c:v", "libx264", "-preset", "fast", "-crf", "23",
             "-c:a", "aac", "-b:a", "128k",
+            "-metadata:s:v:0", "rotate=0",
             str(output_path),
         ]
         completed = subprocess.run(command, capture_output=True, text=True, check=False)
@@ -136,13 +143,19 @@ class FfmpegMediaProcessor:
             start = max(0.0, (duration - target_duration) / 2)
             end = min(duration, start + target_duration)
 
-        command = [
-            ffmpeg, "-y", "-i", str(input_path),
-            "-ss", str(start), "-t", str(end - start),
-            "-c:v", "libx264", "-preset", "fast", "-crf", "23",
-            "-c:a", "aac", "-b:a", "128k",
-            str(output_path),
-        ]
+        command = [ffmpeg, "-y", "-i", str(input_path), "-ss", str(start), "-t", str(end - start)]
+        rotation_steps = self._rotation_filter_steps(input_path)
+        if rotation_steps:
+            command.extend(["-vf", ",".join(rotation_steps)])
+
+        command.extend(
+            [
+                "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+                "-c:a", "aac", "-b:a", "128k",
+                "-metadata:s:v:0", "rotate=0",
+                str(output_path),
+            ]
+        )
         completed = subprocess.run(command, capture_output=True, text=True, check=False)
         if completed.returncode != 0:
             raise RuntimeError(completed.stderr.strip() or "ffmpeg auto-cut failed")
@@ -167,18 +180,17 @@ class FfmpegMediaProcessor:
 
         filter_parts: list[str] = []
         concat_inputs = ""
-        for i, _path in enumerate(expanded_clip_paths):
-            normalize_video = (
-                f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
-                f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,"
-                "fps=30,"
-                "format=yuv420p,"
-                "setsar=1,"
-                "setpts=PTS-STARTPTS"
-            )
-            filter_parts.append(
-                f"[{i}:v]{normalize_video}[v{i}];"
-            )
+        for i, path in enumerate(expanded_clip_paths):
+            normalize_steps = [
+                *self._rotation_filter_steps(path),
+                f"scale={width}:{height}:force_original_aspect_ratio=decrease",
+                f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2",
+                "fps=30",
+                "format=yuv420p",
+                "setsar=1",
+                "setpts=PTS-STARTPTS",
+            ]
+            filter_parts.append(f"[{i}:v]{','.join(normalize_steps)}[v{i}];")
             concat_inputs += f"[v{i}]"
 
         filter_complex = "".join(filter_parts) + f"{concat_inputs}concat=n={n}:v=1:a=0[outv]"
@@ -197,6 +209,7 @@ class FfmpegMediaProcessor:
             "-shortest",
             "-c:v", "libx264", "-preset", "fast", "-crf", "23",
             "-c:a", "aac", "-b:a", "128k",
+            "-metadata:s:v:0", "rotate=0",
             str(output_path),
         ]
         completed = subprocess.run(command, capture_output=True, text=True, check=False)
@@ -225,10 +238,12 @@ class FfmpegMediaProcessor:
             raise RuntimeError("ffmpeg subtitle rendering is unavailable (libass/subtitles filter missing)")
 
         subtitle_arg = _escape_filter_path(subtitle_path)
-        filter_value = f"subtitles='{subtitle_arg}'"
+        filter_steps = [*self._rotation_filter_steps(input_video_path)]
+        subtitle_filter = f"subtitles='{subtitle_arg}'"
         if options.font_path:
             fonts_dir = Path(options.font_path).expanduser().resolve().parent
-            filter_value += f":fontsdir='{_escape_filter_path(fonts_dir)}'"
+            subtitle_filter += f":fontsdir='{_escape_filter_path(fonts_dir)}'"
+        filter_steps.append(subtitle_filter)
 
         command = [
             ffmpeg,
@@ -236,7 +251,7 @@ class FfmpegMediaProcessor:
             "-i",
             str(input_video_path),
             "-vf",
-            filter_value,
+            ",".join(filter_steps),
             "-c:v",
             "libx264",
             "-preset",
@@ -247,6 +262,8 @@ class FfmpegMediaProcessor:
             "aac",
             "-b:a",
             "128k",
+            "-metadata:s:v:0",
+            "rotate=0",
             str(output_path),
         ]
         completed = subprocess.run(command, capture_output=True, text=True, check=False)
@@ -314,6 +331,81 @@ class FfmpegMediaProcessor:
 
         raise RuntimeError("Unable to determine media duration; install ffprobe or upload WAV audio")
 
+    def _probe_video_geometry(self, file_path: Path) -> VideoGeometry | None:
+        ffprobe = shutil.which("ffprobe")
+        if ffprobe is None:
+            return None
+
+        command = [
+            ffprobe,
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_streams",
+            "-of",
+            "json",
+            str(file_path),
+        ]
+        completed = subprocess.run(command, capture_output=True, text=True, check=False)
+        if completed.returncode != 0:
+            return None
+
+        try:
+            payload = json.loads(completed.stdout or "{}")
+        except json.JSONDecodeError:
+            return None
+
+        streams = payload.get("streams") or []
+        if not streams:
+            return None
+
+        stream = streams[0]
+        try:
+            encoded_width = int(stream.get("width") or 0)
+            encoded_height = int(stream.get("height") or 0)
+        except (TypeError, ValueError):
+            return None
+        if encoded_width <= 0 or encoded_height <= 0:
+            return None
+
+        rotation_degrees = 0
+        for side_data in stream.get("side_data_list") or []:
+            normalized_rotation = _normalize_rotation_degrees(side_data.get("rotation"))
+            if normalized_rotation is not None:
+                rotation_degrees = normalized_rotation
+                break
+        if rotation_degrees == 0:
+            rotation_degrees = _normalize_rotation_degrees((stream.get("tags") or {}).get("rotate")) or 0
+
+        if rotation_degrees in (90, 270):
+            display_width = encoded_height
+            display_height = encoded_width
+        else:
+            display_width = encoded_width
+            display_height = encoded_height
+
+        return VideoGeometry(
+            encoded_width=encoded_width,
+            encoded_height=encoded_height,
+            rotation_degrees=rotation_degrees,
+            display_width=display_width,
+            display_height=display_height,
+            is_portrait_display=display_height > display_width,
+        )
+
+    def _rotation_filter_steps(self, file_path: Path) -> list[str]:
+        geometry = self._probe_video_geometry(file_path)
+        if geometry is None:
+            return []
+        if geometry.rotation_degrees == 90:
+            return ["transpose=clock"]
+        if geometry.rotation_degrees == 180:
+            return ["transpose=clock", "transpose=clock"]
+        if geometry.rotation_degrees == 270:
+            return ["transpose=cclock"]
+        return []
+
     def _supports_libass(self, ffmpeg_binary: str) -> bool:
         command = [ffmpeg_binary, "-hide_banner", "-filters"]
         completed = subprocess.run(command, capture_output=True, text=True, check=False)
@@ -343,6 +435,16 @@ def _parse_ffmpeg_duration(stderr_text: str) -> float | None:
     minutes = int(match.group(2))
     seconds = float(match.group(3))
     return hours * 3600 + minutes * 60 + seconds
+
+
+def _normalize_rotation_degrees(value: object) -> int | None:
+    if value is None:
+        return None
+    try:
+        degrees = int(round(float(str(value).strip())))
+    except (TypeError, ValueError):
+        return None
+    return degrees % 360
 
 
 def _resolve_ffmpeg_binary() -> str | None:

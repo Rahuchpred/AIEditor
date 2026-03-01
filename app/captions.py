@@ -11,51 +11,103 @@ _MAX_CUE_MS = 3500
 
 def default_caption_render_options(
     *,
+    frame_width: int = 1920,
+    frame_height: int = 1080,
     font_path: str = "",
     font_name: str = "Arial",
-    font_size: int = 48,
-    bottom_margin: int = 90,
-    max_chars_per_line: int = 32,
-    max_lines: int = 2,
+    font_size: int | None = None,
 ) -> CaptionRenderOptions:
+    is_portrait = frame_height > frame_width
+    if is_portrait:
+        resolved_font_size = font_size if font_size is not None else max(28, round(frame_height * 0.028))
+        margin_left = max(24, round(frame_width * 0.12))
+        margin_right = max(24, round(frame_width * 0.18))
+        bottom_margin = max(80, round(frame_height * 0.24))
+        max_chars_per_line = 22
+        max_lines = 2
+        soft_wrap_threshold = 18
+        soft_wrap_increment_limit = 4
+    else:
+        resolved_font_size = font_size if font_size is not None else max(28, round(frame_height * 0.044))
+        margin_left = 48
+        margin_right = 48
+        bottom_margin = max(48, round(frame_height * 0.08))
+        max_chars_per_line = 32
+        max_lines = 2
+        soft_wrap_threshold = 26
+        soft_wrap_increment_limit = 6
+
     return CaptionRenderOptions(
         font_path=font_path,
         font_name=font_name,
-        font_size=font_size,
+        font_size=resolved_font_size,
         primary_color="&H00FFFFFF",
         outline_color="&H00000000",
         outline_width=3,
+        alignment=2,
+        margin_left=margin_left,
+        margin_right=margin_right,
         bottom_margin=bottom_margin,
         max_chars_per_line=max_chars_per_line,
         max_lines=max_lines,
+        soft_wrap_threshold=soft_wrap_threshold,
+        soft_wrap_increment_limit=soft_wrap_increment_limit,
     )
 
 
-def segments_to_caption_cues(segments: list[TimedTextSegment]) -> list[CaptionCue]:
-    cues: list[CaptionCue] = []
+def segments_to_raw_cues(segments: list[TimedTextSegment]) -> list[CaptionCue]:
+    raw_cues: list[CaptionCue] = []
     for segment in segments:
         if segment.start_ms is None or segment.end_ms is None or segment.end_ms <= segment.start_ms:
             continue
-        cleaned = _normalize_text(segment.text)
+        raw_cues.append(
+            CaptionCue(
+                start_ms=segment.start_ms,
+                end_ms=segment.end_ms,
+                text=str(segment.text or ""),
+            )
+        )
+    return raw_cues
+
+
+def shape_caption_cues(
+    cues: list[CaptionCue],
+    options: CaptionRenderOptions | None = None,
+) -> list[CaptionCue]:
+    if options is None:
+        options = default_caption_render_options()
+
+    shaped_cues: list[CaptionCue] = []
+    for cue in cues:
+        if cue.end_ms <= cue.start_ms:
+            continue
+        cleaned = _normalize_text(cue.text)
         if not cleaned:
             continue
 
-        chunks = _split_text(cleaned, 32, 2)
+        chunks = _split_text(cleaned, options)
         if not chunks:
             continue
 
-        total_duration = max(segment.end_ms - segment.start_ms, _MIN_CUE_MS)
+        total_duration = max(cue.end_ms - cue.start_ms, _MIN_CUE_MS)
         step = max(total_duration // len(chunks), 1)
-        cursor = segment.start_ms
+        cursor = cue.start_ms
 
         for index, chunk in enumerate(chunks):
-            next_cursor = segment.end_ms if index == len(chunks) - 1 else min(segment.end_ms, cursor + step)
+            next_cursor = cue.end_ms if index == len(chunks) - 1 else min(cue.end_ms, cursor + step)
             if next_cursor <= cursor:
-                next_cursor = min(segment.end_ms, cursor + _MIN_CUE_MS)
-            cues.append(CaptionCue(start_ms=cursor, end_ms=next_cursor, text=chunk))
+                next_cursor = min(cue.end_ms, cursor + _MIN_CUE_MS)
+            shaped_cues.append(CaptionCue(start_ms=cursor, end_ms=next_cursor, text=chunk))
             cursor = next_cursor
 
-    return _normalize_cue_lengths(cues)
+    return _normalize_cue_lengths(shaped_cues)
+
+
+def segments_to_caption_cues(
+    segments: list[TimedTextSegment],
+    options: CaptionRenderOptions | None = None,
+) -> list[CaptionCue]:
+    return shape_caption_cues(segments_to_raw_cues(segments), options)
 
 
 def remap_cues_after_cuts(cues: list[CaptionCue], cut_regions: list[dict[str, float]]) -> list[CaptionCue]:
@@ -118,7 +170,8 @@ def write_ass_subtitles(
             "Style: Default,"
             f"{options.font_name},{options.font_size},{options.primary_color},&H000000FF,"
             f"{options.outline_color},&H64000000,-1,0,0,0,100,100,0,0,1,"
-            f"{options.outline_width},0,2,40,40,{options.bottom_margin},1"
+            f"{options.outline_width},0,{options.alignment},{options.margin_left},{options.margin_right},"
+            f"{options.bottom_margin},1"
         ),
         "",
         "[Events]",
@@ -138,7 +191,7 @@ def _normalize_text(text: str) -> str:
     return " ".join(str(text or "").split()).strip()
 
 
-def _split_text(text: str, max_chars_per_line: int, max_lines: int) -> list[str]:
+def _split_text(text: str, options: CaptionRenderOptions) -> list[str]:
     words = text.split()
     if not words:
         return []
@@ -147,8 +200,17 @@ def _split_text(text: str, max_chars_per_line: int, max_lines: int) -> list[str]
     current: list[str] = []
     current_len = 0
     for word in words:
-        projected = current_len + len(word) + (1 if current else 0)
-        if current and projected > max_chars_per_line:
+        next_increment = len(word) + (1 if current else 0)
+        projected = current_len + next_increment
+        if (
+            current
+            and current_len >= options.soft_wrap_threshold
+            and next_increment > options.soft_wrap_increment_limit
+        ):
+            lines.append(" ".join(current))
+            current = [word]
+            current_len = len(word)
+        elif current and projected > options.max_chars_per_line:
             lines.append(" ".join(current))
             current = [word]
             current_len = len(word)
@@ -159,8 +221,8 @@ def _split_text(text: str, max_chars_per_line: int, max_lines: int) -> list[str]
         lines.append(" ".join(current))
 
     chunks: list[str] = []
-    for index in range(0, len(lines), max_lines):
-        chunk_lines = lines[index:index + max_lines]
+    for index in range(0, len(lines), options.max_lines):
+        chunk_lines = lines[index:index + options.max_lines]
         chunks.append("\n".join(chunk_lines))
     return chunks
 
