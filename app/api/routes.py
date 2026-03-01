@@ -16,9 +16,11 @@ from app.captions import (
     segments_to_caption_cues,
     segments_to_raw_cues,
     shape_caption_cues,
+    write_ass_subtitles,
 )
 from app.container import get_container
 from app.media import FfmpegMediaProcessor
+from app.premiere import PremiereClip, PremiereMarker, build_premiere_xml
 from app.providers import TranscriptionProviderError
 from app.schemas import (
     AnalysisJobAccepted,
@@ -52,8 +54,18 @@ def _transcription_provider_from_request(request: Request):
 def _caption_options_for_video(media_proc, file_path: Path, *, font_path: str, font_name: str):
     geometry_probe = getattr(media_proc, "probe_video_geometry", None)
     geometry = geometry_probe(file_path) if callable(geometry_probe) else None
-    frame_width = int(geometry.get("display_width", 1920)) if geometry else 1920
-    frame_height = int(geometry.get("display_height", 1080)) if geometry else 1080
+    if geometry:
+        encoded_width = int(geometry.get("encoded_width") or geometry.get("display_width") or 1080)
+        encoded_height = int(geometry.get("encoded_height") or geometry.get("display_height") or 1920)
+    else:
+        encoded_width = 1080
+        encoded_height = 1920
+
+    # The app burns captions onto videos that were already normalized upright by ffmpeg.
+    # Use the encoded pixel canvas instead of display metadata so stale rotation side-data
+    # cannot flip the subtitle layout back into a landscape coordinate system.
+    frame_width = min(encoded_width, encoded_height)
+    frame_height = max(encoded_width, encoded_height)
     return default_caption_render_options(
         frame_width=frame_width,
         frame_height=frame_height,
@@ -170,8 +182,10 @@ def _build_editor_cues(
 
 
 def _render_options_from_manifest(manifest: dict, track_settings: CaptionTrackSettings) -> CaptionRenderOptions:
-    play_res_x = int(manifest.get("play_res_x") or 1920)
-    play_res_y = int(manifest.get("play_res_y") or 1080)
+    stored_play_res_x = int(manifest.get("play_res_x") or 1080)
+    stored_play_res_y = int(manifest.get("play_res_y") or 1920)
+    play_res_x = min(stored_play_res_x, stored_play_res_y)
+    play_res_y = max(stored_play_res_x, stored_play_res_y)
     return CaptionRenderOptions(
         font_path=str(manifest.get("font_path") or ""),
         font_name=str(manifest.get("font_name") or "Arial"),
@@ -437,8 +451,6 @@ def ui_playground() -> str:
       pointer-events: none;
       z-index: 1;
     }
-    #autoCutCard { display: none; }
-    #autoCutCard.visible { display: block; }
     .autocut-info {
       display: flex;
       align-items: center;
@@ -472,19 +484,18 @@ def ui_playground() -> str:
     .editor-caption-overlay {
       position: absolute;
       left: 50%;
-      top: 78%;
-      transform: translate(-50%, -50%);
+      bottom: 22%;
+      transform: translateX(-50%);
       width: calc(100% - 36px);
       padding: 0 8px;
       text-align: center;
+      white-space: pre-line;
       font-weight: 700;
-      font-size: 26px;
+      font-size: clamp(22px, 4.5vw, 40px);
       line-height: 1.2;
-      text-shadow:
-        -2px -2px 0 rgba(0, 0, 0, 0.95),
-        2px -2px 0 rgba(0, 0, 0, 0.95),
-        -2px 2px 0 rgba(0, 0, 0, 0.95),
-        2px 2px 0 rgba(0, 0, 0, 0.95);
+      -webkit-text-stroke: 3px rgba(0, 0, 0, 0.95);
+      paint-order: stroke fill;
+      text-shadow: none;
       pointer-events: none;
       z-index: 3;
     }
@@ -663,6 +674,7 @@ def ui_playground() -> str:
       color: #bfd0ff;
       text-decoration: none;
     }
+    .download-link.hidden { display: none; }
     .download-link:hover { color: white; }
   </style>
 </head>
@@ -746,6 +758,8 @@ def ui_playground() -> str:
       <div class="editor-controls">
         <button id="editorPlayBtn" type="button" class="ghost">Play</button>
         <button id="renderEditorBtn" type="button">Render Final Video</button>
+        <button id="exportPremiereBtn" type="button" class="ghost">Export Timeline to Premiere Pro</button>
+        <button id="exportSrtBtn" type="button" class="ghost">Export SRT</button>
         <span id="editorTimeDisplay" class="preview-time">0:00 / 0:00</span>
       </div>
       <div id="editorRuler" class="editor-ruler"></div>
@@ -789,17 +803,9 @@ def ui_playground() -> str:
           <span id="cueMeta" class="cue-meta">No cue selected</span>
         </div>
         <div id="editorStatus" class="editor-status"></div>
+        <a id="editorDownloadLink" class="download-link hidden" href="#" download="autocut.mp4">Download Current Video</a>
       </div>
     </div>
-  </div>
-
-  <div id="autoCutCard" class="card portrait-stage-card">
-    <h3>Rendered Video</h3>
-    <div id="autoCutInfo" class="autocut-info"></div>
-    <div class="preview-wrap">
-      <video id="autoCutVideo" class="preview-video" controls preload="metadata"></video>
-    </div>
-    <a id="autoCutDownload" class="download-link" href="#" download="autocut.mp4">Download Rendered Video</a>
   </div>
 
   <script>
@@ -1011,10 +1017,6 @@ def ui_playground() -> str:
 
     // --- Caption Editor ---
     const autoCutBtn = document.getElementById("autoCutBtn");
-    const autoCutCard = document.getElementById("autoCutCard");
-    const autoCutVideo = document.getElementById("autoCutVideo");
-    const autoCutInfo = document.getElementById("autoCutInfo");
-    const autoCutDownload = document.getElementById("autoCutDownload");
     const captionEditorCard = document.getElementById("captionEditorCard");
     const editorVideo = document.getElementById("editorVideo");
     const editorCaptionOverlay = document.getElementById("editorCaptionOverlay");
@@ -1039,16 +1041,18 @@ def ui_playground() -> str:
     const nextCueBtn = document.getElementById("nextCueBtn");
     const cueMeta = document.getElementById("cueMeta");
     const editorStatus = document.getElementById("editorStatus");
+    const editorDownloadLink = document.getElementById("editorDownloadLink");
 
     const editorMiniCtx = editorMiniCanvas.getContext("2d");
     const MIN_EDITOR_CUE_MS = 300;
     let detectedCutRegions = [];
-    let autoCutObjectUrl = null;
+    let editorRenderedObjectUrl = null;
     let editorSessionId = null;
     let editorDuration = 0;
     let editorCues = [];
     let selectedCueId = null;
     let captionTrackSettings = { vertical_position_pct: 78 };
+    let editorPreviewUrl = "";
     let editorThumbVideo = null;
     let editorThumbBusy = false;
     const editorPlayState = { isPlaying: false, currentTime: 0, duration: 0 };
@@ -1067,11 +1071,43 @@ def ui_playground() -> str:
     }
 
     function clearRenderedOutput() {
-      if (autoCutObjectUrl) { URL.revokeObjectURL(autoCutObjectUrl); autoCutObjectUrl = null; }
-      autoCutVideo.removeAttribute("src");
-      autoCutInfo.innerHTML = "";
-      autoCutDownload.href = "#";
-      autoCutCard.classList.remove("visible");
+      if (editorRenderedObjectUrl) {
+        URL.revokeObjectURL(editorRenderedObjectUrl);
+        editorRenderedObjectUrl = null;
+      }
+      editorDownloadLink.href = "#";
+      editorDownloadLink.classList.add("hidden");
+    }
+
+    function setEditorVideoSource(url, preserveTime) {
+      const shouldPreserveTime = Boolean(preserveTime);
+      const targetTime = shouldPreserveTime
+        ? Math.max(0, Number(editorPlayState.currentTime || editorVideo.currentTime || 0))
+        : 0;
+      editorVideo.pause();
+      editorPlayState.isPlaying = false;
+      editorPlayState.currentTime = targetTime;
+      if (url) {
+        if (shouldPreserveTime && targetTime > 0) {
+          const restoreTime = function () {
+            editorVideo.removeEventListener("loadedmetadata", restoreTime);
+            const safeMax = Math.max(0, (editorVideo.duration || editorDuration || 0) - 0.05);
+            const clampedTime = Math.min(targetTime, safeMax);
+            if (clampedTime <= 0) return;
+            try {
+              editorVideo.currentTime = clampedTime;
+            } catch (err) {
+              // Ignore seek failures while the source is still settling.
+            }
+          };
+          editorVideo.addEventListener("loadedmetadata", restoreTime);
+        }
+        editorVideo.src = url;
+        editorVideo.load();
+      } else {
+        editorVideo.removeAttribute("src");
+      }
+      updateEditorPlaybackUI();
     }
 
     function resetEditorSession() {
@@ -1084,13 +1120,13 @@ def ui_playground() -> str:
       editorPlayState.duration = 0;
       dragState.mode = null;
       dragState.cueId = null;
+      editorPreviewUrl = "";
       if (editorThumbVideo) {
         editorThumbVideo.src = "";
         editorThumbVideo = null;
       }
       editorThumbBusy = false;
-      editorVideo.pause();
-      editorVideo.removeAttribute("src");
+      setEditorVideoSource("");
       editorCaptionOverlay.textContent = "";
       editorCaptionOverlay.classList.add("hidden");
       editorTrack.innerHTML =
@@ -1106,6 +1142,8 @@ def ui_playground() -> str:
       cueMeta.textContent = "No cue selected";
       editorTimeDisplay.textContent = "0:00 / 0:00";
       editorRuler.innerHTML = "";
+      editorDownloadLink.href = "#";
+      editorDownloadLink.classList.add("hidden");
       setEditorStatus("", undefined);
     }
 
@@ -1183,7 +1221,7 @@ def ui_playground() -> str:
         return editorPlayState.currentTime * 1000 >= cue.start_ms && editorPlayState.currentTime * 1000 <= cue.end_ms;
       });
       const topPct = Number(captionTrackSettings.vertical_position_pct || 78);
-      editorCaptionOverlay.style.top = topPct + "%";
+      editorCaptionOverlay.style.bottom = (100 - topPct) + "%";
       if (!current || !String(current.text || "").trim()) {
         editorCaptionOverlay.textContent = "";
         editorCaptionOverlay.classList.add("hidden");
@@ -1392,17 +1430,17 @@ def ui_playground() -> str:
     }
 
     function openEditorSession(payload) {
+      clearRenderedOutput();
       editorSessionId = payload.session_id;
       editorDuration = Number(payload.duration_seconds || 0);
       editorCues = Array.isArray(payload.cues) ? payload.cues.slice() : [];
       captionTrackSettings = payload.caption_track || { vertical_position_pct: 78 };
+      editorPreviewUrl = payload.preview_video_url || "";
       selectedCueId = editorCues.length ? editorCues[0].id : null;
       editorPlayState.isPlaying = false;
       editorPlayState.currentTime = 0;
       editorPlayState.duration = editorDuration;
-      editorVideo.pause();
-      editorVideo.src = payload.preview_video_url || "";
-      editorVideo.load();
+      setEditorVideoSource(editorPreviewUrl);
       sizeEditorPreviewCanvas();
       renderEditorRuler();
       renderEditorTimeline();
@@ -1598,25 +1636,78 @@ def ui_playground() -> str:
         }
 
         const blob = await response.blob();
-        if (autoCutObjectUrl) URL.revokeObjectURL(autoCutObjectUrl);
-        autoCutObjectUrl = URL.createObjectURL(blob);
-        autoCutVideo.src = autoCutObjectUrl;
-        autoCutVideo.load();
-        autoCutDownload.href = autoCutObjectUrl;
-
-        const totalCut = detectedCutRegions.reduce(function (sum, region) {
-          return sum + (region.end_s - region.start_s);
-        }, 0);
-        autoCutInfo.innerHTML =
-          '<span>Cuts: <span class="cut-count">' + detectedCutRegions.length + " regions</span></span>" +
-          '<span>Time saved: <span class="saved-time">' + fmtTime(totalCut) + "</span></span>";
-        autoCutCard.classList.add("visible");
-        setEditorStatus("Rendered video ready below.", true);
+        if (editorRenderedObjectUrl) URL.revokeObjectURL(editorRenderedObjectUrl);
+        editorRenderedObjectUrl = URL.createObjectURL(blob);
+        editorDownloadLink.href = editorRenderedObjectUrl;
+        editorDownloadLink.classList.remove("hidden");
+        setEditorStatus("Final video rendered from the current caption-editor preview. The editor stays in preview mode; use the download link for the rendered file.", true);
       } catch (err) {
         setEditorStatus(err.message || "Render failed", false);
       } finally {
         renderEditorBtn.disabled = false;
       }
+    });
+    document.getElementById("exportPremiereBtn").addEventListener("click", async function () {
+      if (!editorSessionId || !editorCues.length) return;
+      const button = this;
+      button.disabled = true;
+      setEditorStatus("Preparing Premiere Pro timeline...", undefined);
+      try {
+        const response = await fetch(`/v1/auto-cut/editor-session/${encodeURIComponent(editorSessionId)}/premiere-export`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            cues: editorCues.map(function (cue) {
+              return {
+                id: cue.id,
+                start_ms: cue.start_ms,
+                end_ms: cue.end_ms,
+                text: cue.text,
+              };
+            }),
+            caption_track: {
+              vertical_position_pct: Number(captionTrackSettings.vertical_position_pct || 78),
+            },
+          }),
+        });
+        if (!response.ok) {
+          const payload = await readJsonOrText(response);
+          throw new Error(extractErrorMessage(payload, "Premiere Pro export failed"));
+        }
+
+        const blob = await response.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = "autocut-premiere.xml";
+        a.click();
+        URL.revokeObjectURL(url);
+        setEditorStatus("Premiere Pro timeline downloaded. Relink the original source file in Premiere if prompted.", true);
+      } catch (err) {
+        setEditorStatus(err.message || "Premiere Pro export failed", false);
+      } finally {
+        button.disabled = false;
+      }
+    });
+    document.getElementById("exportSrtBtn").addEventListener("click", function () {
+      if (!editorCues.length) return;
+      function pad(n, w) { return String(n).padStart(w, "0"); }
+      function fmtTime(ms) {
+        var h = Math.floor(ms / 3600000);
+        var m = Math.floor((ms % 3600000) / 60000);
+        var s = Math.floor((ms % 60000) / 1000);
+        var mil = ms % 1000;
+        return pad(h,2) + ":" + pad(m,2) + ":" + pad(s,2) + "," + pad(mil,3);
+      }
+      var srt = editorCues.map(function (cue, i) {
+        return (i + 1) + "\n" + fmtTime(cue.start_ms) + " --> " + fmtTime(cue.end_ms) + "\n" + cue.text;
+      }).join("\n\n") + "\n";
+      var blob = new Blob([srt], { type: "text/plain" });
+      var a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = "captions.srt";
+      a.click();
+      URL.revokeObjectURL(a.href);
     });
     // --- End Caption Editor ---
 
@@ -1646,14 +1737,15 @@ def ui_playground() -> str:
     }
 
     function extractErrorMessage(payload, fallback) {
+      if (typeof payload === "string" && payload.trim()) return payload.trim();
       if (!payload || typeof payload !== "object") return fallback;
+      if (typeof payload.error === "string" && payload.error.trim()) return payload.error.trim();
       const detail = payload.detail;
       if (typeof detail === "string" && detail.trim()) return detail.trim();
       if (detail && typeof detail === "object") {
         if (typeof detail.message === "string" && detail.message.trim()) return detail.message.trim();
         if (typeof detail.code === "string" && detail.code.trim()) return detail.code.trim();
       }
-      if (typeof payload === "string" && payload.trim()) return payload.trim();
       return fallback;
     }
 
@@ -1909,7 +2001,7 @@ async def auto_cut(
 
             if not cues:
                 raise RuntimeError("No usable caption cues were produced")
-            _media_proc.write_ass_subtitles(cues, Path(subtitle_tmp.name), render_options)
+            write_ass_subtitles(cues, Path(subtitle_tmp.name), render_options)
             _media_proc.burn_subtitles_into_video(
                 Path(output_tmp.name),
                 Path(subtitle_tmp.name),
@@ -1929,7 +2021,7 @@ async def auto_cut(
             filename="autocut.mp4",
             background=BackgroundTask(_cleanup),
         )
-    except (RuntimeError, json.JSONDecodeError, KeyError) as exc:
+    except Exception as exc:
         Path(output_tmp.name).unlink(missing_ok=True)
         Path(subtitle_tmp.name).unlink(missing_ok=True)
         Path(captioned_tmp.name).unlink(missing_ok=True)
@@ -1983,6 +2075,12 @@ async def create_auto_cut_editor_session(
         manifest = {
             "preview_video_key": preview_key,
             "duration_seconds": round(float(_media_proc._probe_duration(Path(preview_tmp.name))), 3),
+            "source_filename": Path(media_file.filename or "source.mp4").name,
+            "source_duration_seconds": round(float(duration), 3),
+            "keep_ranges": [
+                {"start_s": round(float(start), 3), "end_s": round(float(end), 3)}
+                for start, end in keep_ranges
+            ],
             "play_res_x": render_options.play_res_x,
             "play_res_y": render_options.play_res_y,
             "font_name": render_options.font_name,
@@ -2031,6 +2129,92 @@ def get_auto_cut_editor_preview(request: Request, session_id: str):
     return Response(content=payload, media_type="video/mp4")
 
 
+@router.post("/v1/auto-cut/editor-session/{session_id}/premiere-export")
+async def export_auto_cut_editor_session_to_premiere(
+    request: Request,
+    session_id: str,
+    body: RenderEditedCaptionsRequest,
+):
+    container = _container_from_request(request)
+    manifest_key = _editor_session_manifest_key(session_id)
+    try:
+        manifest = json.loads(container.storage.get_bytes(manifest_key).decode("utf-8"))
+    except FileNotFoundError:
+        return JSONResponse({"error": "Editor session not found"}, status_code=404)
+    except Exception:
+        return JSONResponse({"error": "Editor session not found"}, status_code=404)
+
+    cues = normalize_edited_cues(body.cues)
+    if not cues:
+        return JSONResponse({"error": "At least one valid caption cue is required"}, status_code=400)
+
+    source_name = Path(str(manifest.get("source_filename") or "source.mp4")).name
+    source_duration_seconds = float(manifest.get("source_duration_seconds") or manifest.get("duration_seconds") or 0.0)
+    keep_ranges = manifest.get("keep_ranges") or [
+        {"start_s": 0.0, "end_s": float(manifest.get("duration_seconds") or 0.0)}
+    ]
+
+    sequence_cursor = 0.0
+    video_clips: list[PremiereClip] = []
+    audio_clips: list[PremiereClip] = []
+    for index, keep_range in enumerate(keep_ranges, start=1):
+        source_start = max(0.0, float(keep_range.get("start_s") or 0.0))
+        source_end = max(source_start, float(keep_range.get("end_s") or source_start))
+        clip_duration = max(0.0, source_end - source_start)
+        if clip_duration <= 0:
+            continue
+
+        clip_name = f"Keep {index}"
+        clip = PremiereClip(
+            name=clip_name,
+            media_name=source_name,
+            sequence_start_s=sequence_cursor,
+            sequence_end_s=sequence_cursor + clip_duration,
+            source_in_s=source_start,
+            source_out_s=source_end,
+            source_duration_s=max(source_duration_seconds, source_end),
+        )
+        video_clips.append(clip)
+        audio_clips.append(
+            PremiereClip(
+                name=f"{clip_name} Audio",
+                media_name=source_name,
+                sequence_start_s=clip.sequence_start_s,
+                sequence_end_s=clip.sequence_end_s,
+                source_in_s=clip.source_in_s,
+                source_out_s=clip.source_out_s,
+                source_duration_s=clip.source_duration_s,
+            )
+        )
+        sequence_cursor += clip_duration
+
+    if not video_clips:
+        return JSONResponse({"error": "Nothing left after cuts"}, status_code=400)
+
+    markers = [
+        PremiereMarker(
+            name=f"Caption {index}",
+            start_s=cue.start_ms / 1000.0,
+            end_s=cue.end_ms / 1000.0,
+            comment=cue.text,
+        )
+        for index, cue in enumerate(cues, start=1)
+    ]
+    xml_bytes = build_premiere_xml(
+        "AIEdit Auto-Cut",
+        video_clips,
+        audio_clips=audio_clips,
+        markers=markers,
+        width=int(manifest.get("play_res_x") or 1080),
+        height=int(manifest.get("play_res_y") or 1920),
+    )
+    return Response(
+        content=xml_bytes,
+        media_type="application/xml",
+        headers={"Content-Disposition": 'attachment; filename="autocut-premiere.xml"'},
+    )
+
+
 @router.post("/v1/auto-cut/editor-session/{session_id}/render")
 async def render_auto_cut_editor_session(
     request: Request,
@@ -2065,20 +2249,19 @@ async def render_auto_cut_editor_session(
         preview_tmp.close()
 
         render_options = _render_options_from_manifest(manifest, track_settings)
-        _media_proc.write_ass_subtitles(cues, Path(subtitle_tmp.name), render_options)
+        write_ass_subtitles(cues, Path(subtitle_tmp.name), render_options)
         _media_proc.burn_subtitles_into_video(
             Path(preview_tmp.name),
             Path(subtitle_tmp.name),
             Path(output_tmp.name),
             render_options,
+            apply_rotation=True,
         )
 
         def _cleanup() -> None:
             Path(preview_tmp.name).unlink(missing_ok=True)
             Path(subtitle_tmp.name).unlink(missing_ok=True)
             Path(output_tmp.name).unlink(missing_ok=True)
-            _delete_storage_key(container.storage, preview_key)
-            _delete_storage_key(container.storage, manifest_key)
 
         return FileResponse(
             output_tmp.name,
@@ -2086,7 +2269,9 @@ async def render_auto_cut_editor_session(
             filename="autocut.mp4",
             background=BackgroundTask(_cleanup),
         )
-    except RuntimeError as exc:
+    except Exception as exc:
+        import traceback as _tb
+        _tb.print_exc()
         Path(preview_tmp.name).unlink(missing_ok=True)
         Path(subtitle_tmp.name).unlink(missing_ok=True)
         Path(output_tmp.name).unlink(missing_ok=True)
