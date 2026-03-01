@@ -10,11 +10,18 @@ from fastapi import APIRouter, Body, File, Form, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from starlette.background import BackgroundTask
 
+from app.captions import default_caption_render_options, segments_to_caption_cues
 from app.container import get_settings
 from app.hook_catalog import HookCatalogError, get_hook_catalog_service
 from app.media import FfmpegMediaProcessor
-from app.providers import ElevenLabsVoiceCloningProvider, MistralReelScriptProvider, VoiceCloningProviderError
-from app.providers import LLMProviderError
+from app.providers import (
+    ElevenLabsVoiceCloningProvider,
+    HttpElevenLabsTranscriptionProvider,
+    LLMProviderError,
+    MistralReelScriptProvider,
+    TranscriptionProviderError,
+    VoiceCloningProviderError,
+)
 
 router = APIRouter()
 
@@ -208,8 +215,8 @@ _REEL_UI_HTML = """<!doctype html>
 
   <div class="step" id="assembleStep" style="display:none">
     <div class="card">
-      <h3>Step 4: Assemble Reel</h3>
-      <button id="assembleBtn" type="button">Assemble Reel</button>
+      <h3>Step 4: Assemble Reel + Captions</h3>
+      <button id="assembleBtn" type="button">Assemble Reel + Captions</button>
       <span id="assembleStatus" class="status"></span>
       <br />
       <video id="finalReel" controls style="margin-top:10px"></video>
@@ -517,6 +524,7 @@ _REEL_UI_HTML = """<!doctype html>
         const fd = new FormData();
         for (let i = 0; i < files.length; i++) fd.append("clips", files[i]);
         fd.append("voiceover", voiceoverBlob, "voiceover.mp3");
+        fd.append("captions_enabled", "true");
         const r = await fetch("/v1/reel/assemble", { method: "POST", body: fd });
         if (!r.ok) {
           const d = await r.json().catch(() => ({}));
@@ -551,6 +559,14 @@ def _compact_reel_error(exc: Exception) -> str:
         if any(term in lower_line for term in preferred_terms):
             return f"Reel assembly failed: {line[:220]}"
     return f"Reel assembly failed: {lines[-1][:220]}"
+
+
+def _reel_caption_transcription_provider(settings):
+    api_key = settings.elevenlabs_reel_api_key
+    if not api_key:
+        raise TranscriptionProviderError("Missing ElevenLabs API key")
+    caption_settings = settings.model_copy(update={"elevenlabs_api_key": api_key})
+    return HttpElevenLabsTranscriptionProvider(caption_settings)
 
 
 @router.get("/reel-generator", response_class=HTMLResponse)
@@ -670,16 +686,20 @@ async def generate_voiceover(body: dict = Body(...)):
 async def assemble_reel(
     clips: list[UploadFile] = File(..., alias="clips"),
     voiceover: UploadFile = File(...),
+    captions_enabled: bool = Form(default=True),
 ):
     """Assemble B-roll clips with voiceover into final reel."""
     if not clips:
         return JSONResponse({"error": "At least one clip is required"}, status_code=400)
 
+    settings = get_settings()
     media_proc = FfmpegMediaProcessor()
     temp_dir = tempfile.mkdtemp()
     clip_paths: list[Path] = []
     voiceover_path: Path | None = None
     output_path = Path(temp_dir) / "reel.mp4"
+    subtitle_path = Path(temp_dir) / "captions.ass"
+    captioned_output_path = Path(temp_dir) / "reel-captioned.mp4"
 
     try:
         for i, clip in enumerate(clips):
@@ -701,13 +721,35 @@ async def assemble_reel(
             trimmed_paths.append(out)
 
         media_proc.concat_clips_with_audio(trimmed_paths, voiceover_path, output_path)
+        final_output_path = output_path
+
+        if captions_enabled:
+            try:
+                transcription = _reel_caption_transcription_provider(settings).transcribe(voiceover_path, None)
+            except (TranscriptionProviderError, RuntimeError) as exc:
+                raise RuntimeError(f"Caption transcription failed: {exc}") from exc
+
+            cues = segments_to_caption_cues(transcription.segments)
+            if not cues:
+                raise RuntimeError("No usable caption cues were produced")
+
+            render_options = default_caption_render_options(
+                font_path=settings.caption_font_path,
+                font_name=settings.caption_font_name,
+                font_size=52,
+                bottom_margin=130,
+                max_chars_per_line=28,
+            )
+            media_proc.write_ass_subtitles(cues, subtitle_path, render_options)
+            media_proc.burn_subtitles_into_video(output_path, subtitle_path, captioned_output_path, render_options)
+            final_output_path = captioned_output_path
 
         def cleanup():
             import shutil
             shutil.rmtree(temp_dir, ignore_errors=True)
 
         return FileResponse(
-            str(output_path),
+            str(final_output_path),
             media_type="video/mp4",
             filename="reel.mp4",
             background=BackgroundTask(cleanup),
