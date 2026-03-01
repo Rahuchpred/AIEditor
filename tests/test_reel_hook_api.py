@@ -87,6 +87,18 @@ def test_suggest_hooks_returns_suggestions(monkeypatch, tmp_path):
     assert body["suggestions"][0]["id"] == "hook_0001"
 
 
+def test_reel_generator_ui_includes_dictation_controls():
+    with TestClient(create_app()) as client:
+        response = client.get("/reel-generator")
+
+    assert response.status_code == 200
+    html = response.text
+    assert 'id="roughIdeaDictationBtn"' in html
+    assert 'id="dictationStatus"' in html
+    assert "window.SpeechRecognition || window.webkitSpeechRecognition" in html
+    assert "Speech dictation is not available in this browser." in html
+
+
 def test_generate_script_requires_selected_hook_id(monkeypatch, tmp_path):
     hooks_path = _make_hooks_file(tmp_path)
     monkeypatch.setattr("app.api.reel_routes.get_settings", lambda: _settings(hooks_path))

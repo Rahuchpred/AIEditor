@@ -25,19 +25,6 @@ from app.providers import (
 
 router = APIRouter()
 
-
-def _caption_options_for_video(media_proc, file_path: Path, *, font_path: str, font_name: str):
-    geometry_probe = getattr(media_proc, "probe_video_geometry", None)
-    geometry = geometry_probe(file_path) if callable(geometry_probe) else None
-    frame_width = geometry.display_width if geometry is not None else 1080
-    frame_height = geometry.display_height if geometry is not None else 1920
-    return default_caption_render_options(
-        frame_width=frame_width,
-        frame_height=frame_height,
-        font_path=font_path,
-        font_name=font_name,
-    )
-
 _REEL_UI_HTML = """<!doctype html>
 <html lang="en">
 <head>
@@ -118,6 +105,35 @@ _REEL_UI_HTML = """<!doctype html>
     .status.ok { color: var(--ok); }
     .status.err { color: #ff6b6b; }
     .step { margin-bottom: 24px; }
+    .dictation-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+    .dictation-row label { margin-bottom: 0; }
+    .dictation-btn {
+      min-width: 128px;
+      margin-top: 0;
+      padding: 6px 10px;
+      font-size: 12px;
+    }
+    .dictation-btn.active {
+      background: rgba(37, 194, 129, 0.18);
+      border-color: var(--ok);
+      color: #d8ffe9;
+      box-shadow: 0 0 0 1px rgba(37, 194, 129, 0.25);
+    }
+    .dictation-btn:disabled {
+      background: transparent;
+      border-color: var(--border);
+      color: var(--muted);
+    }
+    .dictation-helper {
+      margin-top: 8px;
+      font-size: 12px;
+      color: var(--muted);
+    }
     .hook-grid {
       display: grid;
       gap: 10px;
@@ -157,15 +173,6 @@ _REEL_UI_HTML = """<!doctype html>
       min-width: 200px;
     }
     audio, video { width: 100%; max-width: 100%; border-radius: 8px; margin-top: 8px; }
-    .video-frame {
-      width: 100%;
-      margin-top: 10px;
-    }
-    .video-frame.portrait-preview {
-      max-width: 420px;
-      margin-left: auto;
-      margin-right: auto;
-    }
   </style>
 </head>
 <body>
@@ -196,8 +203,15 @@ _REEL_UI_HTML = """<!doctype html>
   <div class="step">
     <div class="card">
       <h3>Step 2: Idea + Hook Selection</h3>
-      <label>Rough idea / topic</label>
+      <div class="dictation-row">
+        <label for="roughIdea">Rough idea / topic</label>
+        <button id="roughIdeaDictationBtn" type="button" class="ghost dictation-btn" aria-pressed="false">
+          Start Dictation
+        </button>
+      </div>
       <textarea id="roughIdea" placeholder="e.g. 5 productivity hacks that changed my life"></textarea>
+      <div class="dictation-helper">Use your microphone to dictate your rough idea.</div>
+      <div id="dictationStatus" class="status"></div>
       <label>B-roll clips (5–6 videos, in order)</label>
       <input type="file" id="brollFiles" accept="video/*" multiple />
       <br />
@@ -241,9 +255,7 @@ _REEL_UI_HTML = """<!doctype html>
       <button id="assembleBtn" type="button">Assemble Reel + Captions</button>
       <span id="assembleStatus" class="status"></span>
       <br />
-      <div id="finalReelWrap" class="video-frame">
-        <video id="finalReel" controls></video>
-      </div>
+      <video id="finalReel" controls style="margin-top:10px"></video>
       <br />
       <a id="downloadReel" href="#" download="reel.mp4" style="color:var(--brand)">Download</a>
     </div>
@@ -257,6 +269,8 @@ _REEL_UI_HTML = """<!doctype html>
     const voiceSelect = document.getElementById("voiceSelect");
     const loadVoicesBtn = document.getElementById("loadVoicesBtn");
     const roughIdea = document.getElementById("roughIdea");
+    const roughIdeaDictationBtn = document.getElementById("roughIdeaDictationBtn");
+    const dictationStatus = document.getElementById("dictationStatus");
     const brollFiles = document.getElementById("brollFiles");
     const suggestHooksBtn = document.getElementById("suggestHooksBtn");
     const generateScriptBtn = document.getElementById("generateScriptBtn");
@@ -274,9 +288,9 @@ _REEL_UI_HTML = """<!doctype html>
     const assembleStep = document.getElementById("assembleStep");
     const assembleBtn = document.getElementById("assembleBtn");
     const assembleStatus = document.getElementById("assembleStatus");
-    const finalReelWrap = document.getElementById("finalReelWrap");
     const finalReel = document.getElementById("finalReel");
     const downloadReel = document.getElementById("downloadReel");
+    const SpeechRecognitionCtor = window.SpeechRecognition || window.webkitSpeechRecognition;
 
     let currentVoiceId = null;
     let currentScript = null;
@@ -284,16 +298,22 @@ _REEL_UI_HTML = """<!doctype html>
     let currentSelectedHookId = null;
     let currentSelectedHookText = null;
     let voiceoverBlob = null;
+    let speechRecognition = null;
+    const dictationSupported = Boolean(SpeechRecognitionCtor);
+    let dictationListening = false;
+    let dictationStopping = false;
+    let dictationBaseValue = "";
+    let dictationInsertStart = 0;
+    let dictationInsertEnd = 0;
+    let dictationFinalText = "";
+    let dictationInterimText = "";
+    let dictationInternalInput = false;
+    let dictationStopMessage = "";
+    let dictationStopOk = undefined;
 
     function setStatus(el, msg, ok) {
       el.textContent = msg || "";
       el.className = "status" + (ok === true ? " ok" : ok === false ? " err" : "");
-    }
-
-    function updatePortraitPreview(videoEl, wrapEl) {
-      if (!videoEl || !wrapEl) return;
-      const isPortrait = (videoEl.videoHeight || 0) > (videoEl.videoWidth || 0);
-      wrapEl.classList.toggle("portrait-preview", isPortrait);
     }
 
     function resetScriptOutput() {
@@ -307,13 +327,187 @@ _REEL_UI_HTML = """<!doctype html>
       assembleStep.style.display = "none";
       voiceoverAudio.removeAttribute("src");
       finalReel.removeAttribute("src");
-      finalReelWrap.classList.remove("portrait-preview");
       downloadReel.href = "#";
     }
 
-    finalReel.addEventListener("loadedmetadata", () => {
-      updatePortraitPreview(finalReel, finalReelWrap);
-    });
+    function updateDictationButton() {
+      if (!dictationSupported) {
+        roughIdeaDictationBtn.disabled = true;
+        roughIdeaDictationBtn.classList.remove("active");
+        roughIdeaDictationBtn.textContent = "Unavailable";
+        roughIdeaDictationBtn.setAttribute("aria-pressed", "false");
+        return;
+      }
+
+      roughIdeaDictationBtn.disabled = dictationStopping;
+      roughIdeaDictationBtn.classList.toggle("active", dictationListening);
+      roughIdeaDictationBtn.textContent = dictationStopping
+        ? "Stopping..."
+        : (dictationListening ? "Stop Dictation" : "Start Dictation");
+      roughIdeaDictationBtn.setAttribute("aria-pressed", dictationListening ? "true" : "false");
+    }
+
+    function setDictationStatus(msg, ok) {
+      setStatus(dictationStatus, msg, ok);
+    }
+
+    function appendTranscriptChunk(base, chunk) {
+      const normalizedChunk = (chunk || "").trim();
+      if (!normalizedChunk) return base;
+      return base ? (base + " " + normalizedChunk) : normalizedChunk;
+    }
+
+    function buildDictationValue() {
+      const prefix = dictationBaseValue.slice(0, dictationInsertStart);
+      const suffix = dictationBaseValue.slice(dictationInsertEnd);
+      const insertion = [dictationFinalText, dictationInterimText].filter(Boolean).join(" ").trim();
+      return prefix + insertion + suffix;
+    }
+
+    function applyDictationText(triggerInput) {
+      const nextValue = buildDictationValue();
+      const changed = roughIdea.value !== nextValue;
+      roughIdea.value = nextValue;
+      if (triggerInput && changed) {
+        dictationInternalInput = true;
+        try {
+          roughIdea.dispatchEvent(new Event("input", { bubbles: true }));
+        } finally {
+          dictationInternalInput = false;
+        }
+      }
+    }
+
+    function finalizeDictation(statusMessage, ok) {
+      const hadInterimText = Boolean(dictationInterimText);
+      dictationInterimText = "";
+      applyDictationText(hadInterimText);
+      dictationListening = false;
+      dictationStopping = false;
+      dictationStopMessage = "";
+      dictationStopOk = undefined;
+      updateDictationButton();
+      setDictationStatus(statusMessage || "", ok);
+    }
+
+    function stopDictation(statusMessage, ok) {
+      if (!speechRecognition || !dictationListening || dictationStopping) {
+        return;
+      }
+
+      const hadInterimText = Boolean(dictationInterimText);
+      dictationInterimText = "";
+      applyDictationText(hadInterimText);
+
+      dictationStopping = true;
+      dictationStopMessage = statusMessage || "Dictation stopped.";
+      dictationStopOk = ok;
+      updateDictationButton();
+      setDictationStatus("Stopping...", undefined);
+      try {
+        speechRecognition.stop();
+      } catch (error) {
+        finalizeDictation(dictationStopMessage, dictationStopOk);
+      }
+    }
+
+    function describeDictationError(errorCode) {
+      if (errorCode === "not-allowed" || errorCode === "service-not-allowed") {
+        return "Microphone access was denied.";
+      }
+      if (errorCode === "audio-capture") {
+        return "No microphone was detected.";
+      }
+      if (errorCode === "network") {
+        return "Speech recognition hit a network error.";
+      }
+      if (errorCode === "aborted") {
+        return "Speech dictation was interrupted.";
+      }
+      return "Speech dictation could not start.";
+    }
+
+    function startDictation() {
+      if (!dictationSupported || !speechRecognition || dictationListening) {
+        return;
+      }
+
+      dictationBaseValue = roughIdea.value;
+      const fallbackPosition = dictationBaseValue.length;
+      dictationInsertStart = typeof roughIdea.selectionStart === "number" ? roughIdea.selectionStart : fallbackPosition;
+      dictationInsertEnd = typeof roughIdea.selectionEnd === "number" ? roughIdea.selectionEnd : dictationInsertStart;
+      dictationFinalText = "";
+      dictationInterimText = "";
+      dictationStopping = false;
+      dictationStopMessage = "";
+      dictationStopOk = undefined;
+      dictationListening = true;
+      updateDictationButton();
+      setDictationStatus("Starting...", undefined);
+
+      try {
+        speechRecognition.start();
+      } catch (error) {
+        finalizeDictation("Speech dictation could not start.", false);
+      }
+    }
+
+    if (dictationSupported) {
+      speechRecognition = new SpeechRecognitionCtor();
+      speechRecognition.continuous = true;
+      speechRecognition.interimResults = true;
+      speechRecognition.lang = "en-US";
+
+      speechRecognition.onstart = () => {
+        setDictationStatus("Listening...", true);
+      };
+
+      speechRecognition.onresult = (event) => {
+        if (!dictationListening) {
+          return;
+        }
+
+        let nextFinalText = dictationFinalText;
+        let nextInterimText = "";
+        let finalizedChanged = false;
+
+        for (let i = event.resultIndex; i < event.results.length; i++) {
+          const result = event.results[i];
+          const transcript = Array.from(result)
+            .map((choice) => choice.transcript || "")
+            .join(" ")
+            .trim();
+          if (!transcript) {
+            continue;
+          }
+
+          if (result.isFinal) {
+            nextFinalText = appendTranscriptChunk(nextFinalText, transcript);
+            finalizedChanged = true;
+          } else {
+            nextInterimText = appendTranscriptChunk(nextInterimText, transcript);
+          }
+        }
+
+        dictationFinalText = nextFinalText;
+        dictationInterimText = nextInterimText;
+        applyDictationText(finalizedChanged);
+      };
+
+      speechRecognition.onerror = (event) => {
+        finalizeDictation(describeDictationError(event.error), false);
+      };
+
+      speechRecognition.onend = () => {
+        if (!dictationListening) {
+          return;
+        }
+        finalizeDictation(dictationStopMessage || "Dictation stopped.", dictationStopOk);
+      };
+    } else {
+      setDictationStatus("Speech dictation is not available in this browser.", undefined);
+      updateDictationButton();
+    }
 
     function renderHookSuggestions() {
       hookSuggestions.innerHTML = "";
@@ -423,12 +617,34 @@ _REEL_UI_HTML = """<!doctype html>
     });
 
     roughIdea.addEventListener("input", () => {
+      if (dictationListening && !dictationInternalInput) {
+        dictationBaseValue = roughIdea.value;
+        dictationInsertStart = roughIdea.value.length;
+        dictationInsertEnd = dictationInsertStart;
+        dictationFinalText = "";
+        dictationInterimText = "";
+        stopDictation("Dictation stopped because you edited the idea.", undefined);
+      }
       clearHookSelection();
       resetScriptOutput();
       setStatus(scriptStatus, "");
     });
 
+    roughIdeaDictationBtn.addEventListener("click", () => {
+      if (!dictationSupported) {
+        return;
+      }
+      if (dictationListening) {
+        stopDictation("Dictation stopped.", undefined);
+        return;
+      }
+      startDictation();
+    });
+
     suggestHooksBtn.addEventListener("click", async () => {
+      if (dictationListening) {
+        stopDictation("Dictation stopped.", undefined);
+      }
       const idea = roughIdea.value?.trim();
       if (!idea) {
         setStatus(scriptStatus, "Enter a rough idea", false);
@@ -463,6 +679,9 @@ _REEL_UI_HTML = """<!doctype html>
     });
 
     generateScriptBtn.addEventListener("click", async () => {
+      if (dictationListening) {
+        stopDictation("Dictation stopped.", undefined);
+      }
       const idea = roughIdea.value?.trim();
       const files = brollFiles.files;
       if (!idea) {
@@ -760,17 +979,18 @@ async def assemble_reel(
         final_output_path = output_path
 
         if captions_enabled:
-            render_options = _caption_options_for_video(
-                media_proc,
-                output_path,
-                font_path=settings.caption_font_path,
-                font_name=settings.caption_font_name,
-            )
             try:
                 transcription = _reel_caption_transcription_provider(settings).transcribe(voiceover_path, None)
             except (TranscriptionProviderError, RuntimeError) as exc:
                 raise RuntimeError(f"Caption transcription failed: {exc}") from exc
 
+            render_options = default_caption_render_options(
+                frame_width=1080,
+                frame_height=1920,
+                font_path=settings.caption_font_path,
+                font_name=settings.caption_font_name,
+                font_size=52,
+            )
             cues = segments_to_caption_cues(transcription.segments, render_options)
             if not cues:
                 raise RuntimeError("No usable caption cues were produced")
