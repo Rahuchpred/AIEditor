@@ -382,6 +382,20 @@ _REEL_UI_HTML = """<!doctype html>
 """
 
 
+def _compact_reel_error(exc: Exception) -> str:
+    raw_message = str(exc).strip()
+    if not raw_message:
+        return "Reel assembly failed"
+
+    lines = [line.strip() for line in raw_message.splitlines() if line.strip()]
+    preferred_terms = ("error", "invalid", "failed", "unconnected", "required", "no ")
+    for line in reversed(lines):
+        lower_line = line.lower()
+        if any(term in lower_line for term in preferred_terms):
+            return f"Reel assembly failed: {line[:220]}"
+    return f"Reel assembly failed: {lines[-1][:220]}"
+
+
 @router.get("/reel-generator", response_class=HTMLResponse)
 def reel_generator_ui() -> str:
     """Serve the Reel Generator UI page."""
@@ -413,7 +427,7 @@ async def clone_voice(
 ) -> JSONResponse:
     """Create an ElevenLabs voice clone from uploaded audio samples."""
     settings = get_settings()
-    if not settings.elevenlabs_api_key:
+    if not settings.elevenlabs_reel_api_key:
         return JSONResponse({"error": "ElevenLabs API key not configured"}, status_code=503)
     if not audio_files:
         return JSONResponse({"error": "At least one audio file is required"}, status_code=400)
@@ -434,7 +448,7 @@ async def clone_voice(
 async def list_voices() -> JSONResponse:
     """List ElevenLabs voices (including cloned)."""
     settings = get_settings()
-    if not settings.elevenlabs_api_key:
+    if not settings.elevenlabs_reel_api_key:
         return JSONResponse({"error": "ElevenLabs API key not configured"}, status_code=503)
     try:
         provider = ElevenLabsVoiceCloningProvider(settings)
@@ -448,7 +462,7 @@ async def list_voices() -> JSONResponse:
 async def generate_voiceover(body: dict = Body(...)):
     """Generate TTS audio from script using cloned voice."""
     settings = get_settings()
-    if not settings.elevenlabs_api_key:
+    if not settings.elevenlabs_reel_api_key:
         return JSONResponse({"error": "ElevenLabs API key not configured"}, status_code=503)
     voice_id = body.get("voice_id", "").strip()
     text = body.get("text", "").strip()
@@ -511,4 +525,4 @@ async def assemble_reel(
     except Exception as e:
         import shutil
         shutil.rmtree(temp_dir, ignore_errors=True)
-        return JSONResponse({"error": str(e)}, status_code=400)
+        return JSONResponse({"error": _compact_reel_error(e)}, status_code=400)
