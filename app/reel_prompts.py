@@ -56,15 +56,42 @@ Return valid JSON only with this exact structure:
 """
 
 
+def build_style_analysis_prompt(transcript: str) -> str:
+    """Build the Mistral prompt for analyzing a transcript's script style."""
+    return f"""Analyze the **style** of the following transcript. Describe its tone, pacing, sentence structure, energy level, rhetorical devices, vocabulary level, and transitions.
+
+**Rules:**
+- Do NOT summarize the content or topic of the transcript
+- Do NOT quote any words or phrases from the transcript
+- Focus only on stylistic qualities that could be applied to a completely different topic
+- Return valid JSON only, no markdown or extra text
+
+**Transcript:**
+{transcript}
+
+Return a JSON object with this exact structure:
+{{
+  "style_notes": "<a concise paragraph describing the style>"
+}}"""
+
+
 def build_reel_script_prompt(
     rough_idea: str,
     selected_hook_text: str,
     clip_count: int,
     selected_hook_section: str | None = None,
+    style_notes: str | None = None,
 ) -> str:
     """Build the Mistral prompt for generating a viral reel script."""
     section_line = f"\n**Selected hook section/category:** {selected_hook_section}\n" if selected_hook_section else "\n"
+    style_block = ""
+    if style_notes:
+        style_block = f"""
+**Style reference (match this style, but do NOT copy any words from the example):**
+{style_notes}
+"""
     return f"""You are an expert Instagram Reels content strategist. Create a viral-style script for an Instagram Reel.
+{style_block}
 
 **Selected hook chosen by the user:**
 {selected_hook_text}

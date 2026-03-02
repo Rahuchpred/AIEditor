@@ -177,6 +177,13 @@ class RenderEditedCaptionsRequest(BaseModel):
     caption_track: CaptionTrackSettings
 
 
+class StyleAnalysisResult(BaseModel):
+    """Result of analyzing an example video's script style."""
+
+    style_notes: str
+    example_transcript: str
+
+
 class ReelScriptRequest(BaseModel):
     """Request to generate a reel script."""
 

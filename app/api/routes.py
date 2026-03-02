@@ -20,7 +20,6 @@ from app.captions import (
 )
 from app.container import get_container
 from app.media import FfmpegMediaProcessor
-from app.premiere import PremiereClip, PremiereMarker, build_premiere_xml
 from app.providers import TranscriptionProviderError
 from app.schemas import (
     AnalysisJobAccepted,
@@ -717,8 +716,8 @@ def ui_playground() -> str:
         <input id="job_id" type="text" placeholder="Paste job id..." />
       </div>
       <div style="display:flex; align-items:flex-end; gap:8px;">
-        <button id="statusBtn" class="ghost" type="button">Get Status</button>
-        <button id="resultBtn" class="ghost" type="button">Get Result</button>
+        <button id="statusBtn" class="btn-ghost" type="button">Get Status</button>
+        <button id="resultBtn" class="btn-ghost" type="button">Get Result</button>
       </div>
     </div>
   </div>
@@ -732,7 +731,7 @@ def ui_playground() -> str:
       </div>
       <div class="preview-controls">
         <button id="playPauseBtn" type="button">Play</button>
-        <button id="autoCutBtn" class="ghost" type="button" disabled>Open Caption Editor</button>
+        <button id="autoCutBtn" class="btn-ghost" type="button" disabled>Open Caption Editor</button>
         <span id="timeDisplay" class="preview-time">0:00 / 0:00</span>
       </div>
       <div id="tlContainer" class="tl-container">
@@ -756,10 +755,9 @@ def ui_playground() -> str:
         <div id="editorCaptionOverlay" class="editor-caption-overlay hidden"></div>
       </div>
       <div class="editor-controls">
-        <button id="editorPlayBtn" type="button" class="ghost">Play</button>
+        <button id="editorPlayBtn" type="button" class="btn-ghost">Play</button>
         <button id="renderEditorBtn" type="button">Render Final Video</button>
-        <button id="exportPremiereBtn" type="button" class="ghost">Export Timeline to Premiere Pro</button>
-        <button id="exportSrtBtn" type="button" class="ghost">Export SRT</button>
+        <button id="exportSrtBtn" type="button" class="btn-ghost">Export SRT</button>
         <span id="editorTimeDisplay" class="preview-time">0:00 / 0:00</span>
       </div>
       <div id="editorRuler" class="editor-ruler"></div>
@@ -797,8 +795,8 @@ def ui_playground() -> str:
         </div>
         <div class="cue-nav">
           <div class="cue-nav-actions">
-            <button id="prevCueBtn" type="button" class="ghost">Previous</button>
-            <button id="nextCueBtn" type="button" class="ghost">Next</button>
+            <button id="prevCueBtn" type="button" class="btn-ghost">Previous</button>
+            <button id="nextCueBtn" type="button" class="btn-ghost">Next</button>
           </div>
           <span id="cueMeta" class="cue-meta">No cue selected</span>
         </div>
@@ -1492,7 +1490,7 @@ def ui_playground() -> str:
       } catch (err) {
         showTranscript("Caption editor error: " + (err.message || "Network request failed"));
       } finally {
-        autoCutBtn.textContent = "Open Caption Editor";
+        autoCutBtn.textContent = "Open Editor";
         autoCutBtn.disabled = !detectedCutRegions.length;
       }
     });
@@ -1645,48 +1643,6 @@ def ui_playground() -> str:
         setEditorStatus(err.message || "Render failed", false);
       } finally {
         renderEditorBtn.disabled = false;
-      }
-    });
-    document.getElementById("exportPremiereBtn").addEventListener("click", async function () {
-      if (!editorSessionId || !editorCues.length) return;
-      const button = this;
-      button.disabled = true;
-      setEditorStatus("Preparing Premiere Pro timeline...", undefined);
-      try {
-        const response = await fetch(`/v1/auto-cut/editor-session/${encodeURIComponent(editorSessionId)}/premiere-export`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            cues: editorCues.map(function (cue) {
-              return {
-                id: cue.id,
-                start_ms: cue.start_ms,
-                end_ms: cue.end_ms,
-                text: cue.text,
-              };
-            }),
-            caption_track: {
-              vertical_position_pct: Number(captionTrackSettings.vertical_position_pct || 78),
-            },
-          }),
-        });
-        if (!response.ok) {
-          const payload = await readJsonOrText(response);
-          throw new Error(extractErrorMessage(payload, "Premiere Pro export failed"));
-        }
-
-        const blob = await response.blob();
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = "autocut-premiere.xml";
-        a.click();
-        URL.revokeObjectURL(url);
-        setEditorStatus("Premiere Pro timeline downloaded. Relink the original source file in Premiere if prompted.", true);
-      } catch (err) {
-        setEditorStatus(err.message || "Premiere Pro export failed", false);
-      } finally {
-        button.disabled = false;
       }
     });
     document.getElementById("exportSrtBtn").addEventListener("click", function () {
@@ -2127,92 +2083,6 @@ def get_auto_cut_editor_preview(request: Request, session_id: str):
     except Exception:
         return JSONResponse({"error": "Editor preview is unavailable"}, status_code=404)
     return Response(content=payload, media_type="video/mp4")
-
-
-@router.post("/v1/auto-cut/editor-session/{session_id}/premiere-export")
-async def export_auto_cut_editor_session_to_premiere(
-    request: Request,
-    session_id: str,
-    body: RenderEditedCaptionsRequest,
-):
-    container = _container_from_request(request)
-    manifest_key = _editor_session_manifest_key(session_id)
-    try:
-        manifest = json.loads(container.storage.get_bytes(manifest_key).decode("utf-8"))
-    except FileNotFoundError:
-        return JSONResponse({"error": "Editor session not found"}, status_code=404)
-    except Exception:
-        return JSONResponse({"error": "Editor session not found"}, status_code=404)
-
-    cues = normalize_edited_cues(body.cues)
-    if not cues:
-        return JSONResponse({"error": "At least one valid caption cue is required"}, status_code=400)
-
-    source_name = Path(str(manifest.get("source_filename") or "source.mp4")).name
-    source_duration_seconds = float(manifest.get("source_duration_seconds") or manifest.get("duration_seconds") or 0.0)
-    keep_ranges = manifest.get("keep_ranges") or [
-        {"start_s": 0.0, "end_s": float(manifest.get("duration_seconds") or 0.0)}
-    ]
-
-    sequence_cursor = 0.0
-    video_clips: list[PremiereClip] = []
-    audio_clips: list[PremiereClip] = []
-    for index, keep_range in enumerate(keep_ranges, start=1):
-        source_start = max(0.0, float(keep_range.get("start_s") or 0.0))
-        source_end = max(source_start, float(keep_range.get("end_s") or source_start))
-        clip_duration = max(0.0, source_end - source_start)
-        if clip_duration <= 0:
-            continue
-
-        clip_name = f"Keep {index}"
-        clip = PremiereClip(
-            name=clip_name,
-            media_name=source_name,
-            sequence_start_s=sequence_cursor,
-            sequence_end_s=sequence_cursor + clip_duration,
-            source_in_s=source_start,
-            source_out_s=source_end,
-            source_duration_s=max(source_duration_seconds, source_end),
-        )
-        video_clips.append(clip)
-        audio_clips.append(
-            PremiereClip(
-                name=f"{clip_name} Audio",
-                media_name=source_name,
-                sequence_start_s=clip.sequence_start_s,
-                sequence_end_s=clip.sequence_end_s,
-                source_in_s=clip.source_in_s,
-                source_out_s=clip.source_out_s,
-                source_duration_s=clip.source_duration_s,
-            )
-        )
-        sequence_cursor += clip_duration
-
-    if not video_clips:
-        return JSONResponse({"error": "Nothing left after cuts"}, status_code=400)
-
-    markers = [
-        PremiereMarker(
-            name=f"Caption {index}",
-            start_s=cue.start_ms / 1000.0,
-            end_s=cue.end_ms / 1000.0,
-            comment=cue.text,
-        )
-        for index, cue in enumerate(cues, start=1)
-    ]
-    xml_bytes = build_premiere_xml(
-        "AIEdit Auto-Cut",
-        video_clips,
-        audio_clips=audio_clips,
-        markers=markers,
-        width=int(manifest.get("play_res_x") or 1080),
-        height=int(manifest.get("play_res_y") or 1920),
-    )
-    return Response(
-        content=xml_bytes,
-        media_type="application/xml",
-        headers={"Content-Disposition": 'attachment; filename="autocut-premiere.xml"'},
-    )
 
 
 @router.post("/v1/auto-cut/editor-session/{session_id}/render")

@@ -21,7 +21,7 @@ def default_caption_render_options(
     is_portrait = frame_height > frame_width
     if is_portrait:
         resolved_font_size = font_size if font_size is not None else max(
-            28, round(frame_height * 0.02))
+            28, round(frame_height * 0.04))
         alignment = 2
         margin_left = 24
         margin_right = 24

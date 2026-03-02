@@ -1,0 +1,8 @@
+{"time":"2026-03-01T13:36:32.524777-08:00","level":"INFO","msg":"stream: starting","core version":"0.25.0"}
+{"time":"2026-03-01T13:36:32.710814-08:00","level":"INFO","msg":"stream: created new stream","id":"i1nn6z64"}
+{"time":"2026-03-01T13:36:32.71092-08:00","level":"INFO","msg":"handler: started","stream_id":"i1nn6z64"}
+{"time":"2026-03-01T13:36:32.712579-08:00","level":"INFO","msg":"stream: started","id":"i1nn6z64"}
+{"time":"2026-03-01T13:36:32.712601-08:00","level":"INFO","msg":"writer: started","stream_id":"i1nn6z64"}
+{"time":"2026-03-01T13:36:32.712609-08:00","level":"INFO","msg":"sender: started","stream_id":"i1nn6z64"}
+{"time":"2026-03-01T13:36:32.79338-08:00","level":"ERROR","msg":"api: HTTP error","status":404,"method":"POST","url":"https://api.wandb.ai/graphql"}
+{"time":"2026-03-01T13:36:32.793453-08:00","level":"ERROR","msg":"runupserter: failed to init run","error":"returned error 404: {\"data\":{\"upsertBucket\":null},\"errors\":[{\"message\":\"entity joldoshkanov@gmail.com not found during upsertBucket\",\"path\":[\"upsertBucket\"]}]}"}

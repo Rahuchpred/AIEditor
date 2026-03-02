@@ -1,0 +1,13 @@
+2026-03-01 14:37:53,781 INFO    MainThread:89672 [wandb_setup.py:_flush():81] Current SDK version is 0.25.0
+2026-03-01 14:37:53,781 INFO    MainThread:89672 [wandb_setup.py:_flush():81] Configure stats pid to 89672
+2026-03-01 14:37:53,781 INFO    MainThread:89672 [wandb_setup.py:_flush():81] Loading settings from environment variables
+2026-03-01 14:37:53,781 INFO    MainThread:89672 [wandb_init.py:setup_run_log_directory():717] Logging user logs to /Users/rahazh/Documents/coding/AIEdit/wandb/run-20260301_143753-0ql2ww7k/logs/debug.log
+2026-03-01 14:37:53,781 INFO    MainThread:89672 [wandb_init.py:setup_run_log_directory():718] Logging internal logs to /Users/rahazh/Documents/coding/AIEdit/wandb/run-20260301_143753-0ql2ww7k/logs/debug-internal.log
+2026-03-01 14:37:53,781 INFO    MainThread:89672 [wandb_init.py:init():844] calling init triggers
+2026-03-01 14:37:53,781 INFO    MainThread:89672 [wandb_init.py:init():849] wandb.init called with sweep_config: {}
+config: {'prompt_version': 'reel-script-v1', 'llm_provider': 'mistral', 'model': 'mistral-small-latest', 'clip_count': 2, '_wandb': {}}
+2026-03-01 14:37:53,781 INFO    MainThread:89672 [wandb_init.py:init():892] starting backend
+2026-03-01 14:37:54,074 INFO    MainThread:89672 [wandb_init.py:init():895] sending inform_init request
+2026-03-01 14:37:54,104 INFO    MainThread:89672 [wandb_init.py:init():903] backend started and connected
+2026-03-01 14:37:54,120 INFO    MainThread:89672 [wandb_init.py:init():973] updated telemetry
+2026-03-01 14:37:54,245 INFO    MainThread:89672 [wandb_init.py:init():997] communicating run to backend with 90.0 second timeout

@@ -95,13 +95,23 @@ def test_reel_generator_ui_includes_dictation_controls():
     html = response.text
     assert 'id="roughIdeaDictationBtn"' in html
     assert 'id="dictationStatus"' in html
-    assert "Export Timeline to Premiere Pro" in html
-    assert 'id="downloadCaptionsOverlay"' in html
+    assert 'id="downloadCaptionedReel"' in html
+    assert 'id="includeCaptionedVersion"' in html
     assert 'id="reelPreviewToggleBtn"' in html
     assert 'id="reelPreviewTime"' in html
-    assert "Prepare B-roll + Captions" in html
+    assert 'id="reelPreviewEmpty"' in html
+    assert 'id="reelPreviewShell" class="asset-preview-shell hidden"' in html
+    assert 'id="reelPreviewControls" class="asset-preview-controls hidden"' in html
+    assert 'id="reelPreviewToggleBtn" type="button" class="ghost" disabled' in html
+    assert "Preview will appear after you prepare the reel." in html
+    assert "Prepare Reel Versions" in html
+    assert "Prepare Download Versions" in html
+    assert "Also prepare a captioned download" in html
     assert "window.SpeechRecognition || window.webkitSpeechRecognition" in html
     assert "Speech dictation is not available in this browser." in html
+    assert "function clearReelPreview()" in html
+    assert "clearReelPreview();" in html
+    assert 'captionedFd.append("narration_text", getFullNarration());' in html
 
 
 def test_generate_script_requires_selected_hook_id(monkeypatch, tmp_path):

@@ -45,38 +45,6 @@ def test_assemble_reel_returns_video_response(monkeypatch):
     assert processor.concat_calls[0][2] is False
 
 
-def test_export_reel_to_premiere_returns_xml(monkeypatch):
-    class FakeProcessor:
-        def _probe_duration(self, file_path):
-            name = file_path.name
-            if "voiceover" in name:
-                return 11.0
-            if "clip_0" in name:
-                return 8.0
-            if "clip_1" in name:
-                return 4.0
-            return 5.0
-
-    monkeypatch.setattr("app.api.reel_routes.FfmpegMediaProcessor", FakeProcessor)
-
-    with TestClient(create_app()) as client:
-        response = client.post(
-            "/v1/reel/export-premiere",
-            files=[
-                ("clips", ("clip0.mp4", b"clip-0", "video/mp4")),
-                ("clips", ("clip1.mp4", b"clip-1", "video/mp4")),
-                ("voiceover", ("voiceover.mp3", b"voiceover", "audio/mpeg")),
-            ],
-        )
-
-    assert response.status_code == 200
-    assert response.headers["content-type"].startswith("application/xml")
-    assert '<xmeml version="5">' in response.text
-    assert response.text.count("clip0.mp4") >= 2
-    assert "clip1.mp4" in response.text
-    assert "voiceover.mp3" in response.text
-
-
 def test_assemble_reel_returns_compact_error_message(monkeypatch):
     verbose_error = "\n".join(
         [
@@ -167,6 +135,85 @@ def test_assemble_reel_with_captions_transcribes_and_burns(monkeypatch):
     assert options.alignment == 2
     assert options.play_res_x == 1080
     assert options.play_res_y == 1920
+
+
+def test_render_reel_with_captions_uses_existing_video(monkeypatch):
+    class FakeProcessor:
+        def __init__(self):
+            self.caption_burns = []
+
+        def burn_subtitles_into_video(self, input_video_path, subtitle_path, output_path, options):
+            self.caption_burns.append((input_video_path, subtitle_path, output_path, options))
+            output_path.write_bytes(b"captioned-video-bytes")
+
+    class FakeTranscriptionProvider:
+        def transcribe(self, audio_path, language_hint):
+            return TranscriptionResult(
+                language_detected="en",
+                segments=[TimedTextSegment(start_ms=0, end_ms=1000, text="Caption line")],
+            )
+
+    processor = FakeProcessor()
+    monkeypatch.setattr("app.api.reel_routes.FfmpegMediaProcessor", lambda: processor)
+    monkeypatch.setattr(
+        "app.api.reel_routes._reel_caption_transcription_provider",
+        lambda settings: FakeTranscriptionProvider(),
+    )
+
+    with TestClient(create_app()) as client:
+        response = client.post(
+            "/v1/reel/caption-video",
+            files=[
+                ("video", ("reel.mp4", b"video-bytes", "video/mp4")),
+                ("voiceover", ("voiceover.mp3", b"voiceover", "audio/mpeg")),
+            ],
+        )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("video/mp4")
+    assert response.content == b"captioned-video-bytes"
+    assert len(processor.caption_burns) == 1
+    options = processor.caption_burns[0][3]
+    assert options.play_res_x == 1080
+    assert options.play_res_y == 1920
+
+
+def test_render_reel_with_captions_uses_narration_text_without_transcription(monkeypatch):
+    class FakeProcessor:
+        def __init__(self):
+            self.caption_burns = []
+            self.subtitle_text = ""
+
+        def _probe_duration(self, file_path):
+            return 4.0
+
+        def burn_subtitles_into_video(self, input_video_path, subtitle_path, output_path, options):
+            self.caption_burns.append((input_video_path, subtitle_path, output_path, options))
+            self.subtitle_text = subtitle_path.read_text(encoding="utf-8")
+            output_path.write_bytes(b"captioned-video-bytes")
+
+    processor = FakeProcessor()
+    monkeypatch.setattr("app.api.reel_routes.FfmpegMediaProcessor", lambda: processor)
+    monkeypatch.setattr(
+        "app.api.reel_routes._reel_caption_transcription_provider",
+        lambda settings: (_ for _ in ()).throw(AssertionError("transcription should not be called")),
+    )
+
+    with TestClient(create_app()) as client:
+        response = client.post(
+            "/v1/reel/caption-video",
+            data={"narration_text": "Hello world from the generated script"},
+            files=[
+                ("video", ("reel.mp4", b"video-bytes", "video/mp4")),
+                ("voiceover", ("voiceover.mp3", b"voiceover", "audio/mpeg")),
+            ],
+        )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("video/mp4")
+    assert response.content == b"captioned-video-bytes"
+    assert len(processor.caption_burns) == 1
+    assert "Hello world" in processor.subtitle_text
 
 
 def test_render_reel_captions_overlay_returns_video_response(monkeypatch):

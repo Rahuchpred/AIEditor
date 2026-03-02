@@ -55,7 +55,7 @@ def test_root_ui_includes_caption_editor_controls():
     assert 'id="editorTimeline"' in html
     assert 'id="cueText"' in html
     assert "Render Final Video" in html
-    assert "Export Timeline to Premiere Pro" in html
+    assert "Export Timeline to Premiere Pro" not in html
     assert 'id="editorDownloadLink"' in html
     assert "<h3>Rendered Video</h3>" not in html
     assert "payload.error" in html
@@ -156,7 +156,7 @@ def test_auto_cut_editor_render_returns_video_and_keeps_session_available(contex
     assert preview_response.content == b"trimmed-video"
 
 
-def test_auto_cut_editor_premiere_export_returns_xml(context_factory, monkeypatch):
+def test_auto_cut_editor_premiere_export_route_is_removed(context_factory, monkeypatch):
     context = context_factory()
 
     class FakeProcessor:
@@ -184,11 +184,7 @@ def test_auto_cut_editor_premiere_export_returns_xml(context_factory, monkeypatc
         },
     )
 
-    assert export_response.status_code == 200
-    assert export_response.headers["content-type"].startswith("application/xml")
-    assert '<xmeml version="5">' in export_response.text
-    assert "clip.mp4" in export_response.text
-    assert "Hello from the transcript." in export_response.text
+    assert export_response.status_code == 404
 
 
 def test_caption_options_use_encoded_portrait_canvas_when_display_metadata_is_stale():

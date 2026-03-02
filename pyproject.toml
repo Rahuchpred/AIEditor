@@ -8,11 +8,14 @@ dependencies = [
   "celery[redis]>=5.4.0",
   "fastapi>=0.116.0",
   "httpx>=0.28.0",
+  "pypdf>=5.0.0",
   "psycopg[binary]>=3.2.0",
   "pydantic-settings>=2.7.0",
   "python-multipart>=0.0.20",
   "sqlalchemy>=2.0.38",
   "uvicorn>=0.34.0",
+  "wandb>=0.24.0",
+  "moviepy>=2.0.0",
 ]
 
 [project.optional-dependencies]

@@ -11,7 +11,7 @@ from app.config import Settings
 from app.constants import DEFAULT_ENGLISH_LANGUAGE_CODE, DEFAULT_TIPS_COUNT
 from app.experiment_tracking import log_reel_prompt_experiment
 from app.prompts import build_caption_cleanup_prompt, build_rewrite_prompt, build_tips_prompt
-from app.reel_prompts import build_hook_suggestion_prompt, build_reel_script_prompt
+from app.reel_prompts import build_hook_suggestion_prompt, build_reel_script_prompt, build_style_analysis_prompt
 from app.schemas import (
     CorrectedCaptions,
     HookSuggestion,
@@ -479,11 +479,28 @@ class MistralReelScriptProvider:
             pass
         return _fallback_hook_suggestions(candidates, normalized_limit)
 
+    def analyze_example_style(self, transcript: str) -> str:
+        """Analyze a transcript's style and return concise style notes."""
+        if not self._settings.mistral_api_key:
+            raise LLMProviderError("Missing Mistral API key")
+        prompt = build_style_analysis_prompt(transcript)
+        payload = self._chat_json(
+            prompt,
+            timeout_error="Mistral style analysis request timed out",
+            request_error="Mistral style analysis request failed",
+            invalid_json_error="Mistral style analysis response was not valid JSON",
+        )
+        style_notes = str(payload.get("style_notes", "")).strip()
+        if not style_notes:
+            raise LLMProviderError("Mistral style analysis returned empty style_notes")
+        return style_notes
+
     def generate_reel_script(
         self,
         rough_idea: str,
         selected_hook: HookTemplate | str | int,
         clip_count: int | None = None,
+        style_notes: str | None = None,
     ) -> ReelScript:
         """Generate a viral reel script from a rough idea. Uses JSON mode for structured output."""
         if not self._settings.mistral_api_key:
@@ -495,6 +512,7 @@ class MistralReelScriptProvider:
             resolved_hook.hook_text,
             resolved_clip_count,
             resolved_hook.section,
+            style_notes=style_notes,
         )
         try:
             payload = self._chat_json(
