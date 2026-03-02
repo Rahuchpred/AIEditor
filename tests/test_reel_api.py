@@ -4,6 +4,7 @@ from unittest.mock import MagicMock
 
 from fastapi.testclient import TestClient
 
+import app.api.reel_routes as reel_routes
 from app.main import create_app
 from app.schemas import TimedTextSegment, TranscriptionResult
 
@@ -43,6 +44,39 @@ def test_assemble_reel_returns_video_response(monkeypatch):
     assert len(processor.concat_calls) == 1
     assert len(processor.concat_calls[0][0]) == 2
     assert processor.concat_calls[0][2] is False
+
+
+def test_assemble_reel_json_response_returns_download_url(monkeypatch):
+    class FakeProcessor:
+        def auto_cut_clip(self, input_path, output_path, target_duration=5.0, max_duration=7.0):
+            output_path.write_bytes(b"trimmed")
+
+        def concat_clips_with_audio(self, clip_paths, audio_path, output_path, *, apply_rotation=True):
+            output_path.write_bytes(b"video-bytes")
+
+    reel_routes._REEL_DOWNLOADS.clear()
+    reel_routes._REEL_DOWNLOAD_ORDER.clear()
+    monkeypatch.setattr("app.api.reel_routes.FfmpegMediaProcessor", FakeProcessor)
+
+    with TestClient(create_app()) as client:
+        response = client.post(
+            "/v1/reel/assemble",
+            files=[
+                ("clips", ("clip0.mp4", b"clip-0", "video/mp4")),
+                ("voiceover", ("voiceover.mp3", b"voiceover", "audio/mpeg")),
+            ],
+            data={"captions_enabled": "false", "response_mode": "json"},
+        )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["asset_id"]
+        assert payload["download_url"].endswith(payload["asset_id"])
+
+        download_response = client.get(payload["download_url"])
+        assert download_response.status_code == 200
+        assert download_response.headers["content-type"].startswith("video/mp4")
+        assert download_response.content == b"video-bytes"
 
 
 def test_assemble_reel_returns_compact_error_message(monkeypatch):
@@ -214,6 +248,64 @@ def test_render_reel_with_captions_uses_narration_text_without_transcription(mon
     assert response.content == b"captioned-video-bytes"
     assert len(processor.caption_burns) == 1
     assert "Hello world" in processor.subtitle_text
+
+
+def test_render_reel_with_captions_can_reuse_stored_plain_reel(monkeypatch):
+    class FakeProcessor:
+        def __init__(self):
+            self.caption_burns = []
+
+        def auto_cut_clip(self, input_path, output_path, target_duration=5.0, max_duration=7.0):
+            output_path.write_bytes(b"trimmed")
+
+        def concat_clips_with_audio(self, clip_paths, audio_path, output_path, *, apply_rotation=True):
+            output_path.write_bytes(b"video-bytes")
+
+        def burn_subtitles_into_video(self, input_video_path, subtitle_path, output_path, options):
+            self.caption_burns.append((input_video_path, subtitle_path, output_path, options))
+            output_path.write_bytes(b"captioned-video-bytes")
+
+    class FakeTranscriptionProvider:
+        def transcribe(self, audio_path, language_hint):
+            return TranscriptionResult(
+                language_detected="en",
+                segments=[TimedTextSegment(start_ms=0, end_ms=1000, text="Caption line")],
+            )
+
+    processor = FakeProcessor()
+    reel_routes._REEL_DOWNLOADS.clear()
+    reel_routes._REEL_DOWNLOAD_ORDER.clear()
+    monkeypatch.setattr("app.api.reel_routes.FfmpegMediaProcessor", lambda: processor)
+    monkeypatch.setattr(
+        "app.api.reel_routes._reel_caption_transcription_provider",
+        lambda settings: FakeTranscriptionProvider(),
+    )
+
+    with TestClient(create_app()) as client:
+        assemble_response = client.post(
+            "/v1/reel/assemble",
+            files=[
+                ("clips", ("clip0.mp4", b"clip-0", "video/mp4")),
+                ("voiceover", ("voiceover.mp3", b"voiceover", "audio/mpeg")),
+            ],
+            data={"captions_enabled": "false", "response_mode": "json"},
+        )
+        asset_id = assemble_response.json()["asset_id"]
+
+        response = client.post(
+            "/v1/reel/caption-video",
+            data={"source_asset_id": asset_id, "response_mode": "json"},
+            files=[("voiceover", ("voiceover.mp3", b"voiceover", "audio/mpeg"))],
+        )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["download_url"].startswith("/v1/reel/downloads/")
+
+        download_response = client.get(payload["download_url"])
+        assert download_response.status_code == 200
+        assert download_response.content == b"captioned-video-bytes"
+        assert len(processor.caption_burns) == 1
 
 
 def test_render_reel_captions_overlay_returns_video_response(monkeypatch):

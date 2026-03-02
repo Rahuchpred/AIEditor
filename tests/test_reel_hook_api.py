@@ -102,15 +102,16 @@ def test_reel_generator_ui_includes_dictation_controls():
     assert 'id="reelPreviewEmpty"' in html
     assert 'id="reelPreviewShell" class="asset-preview-shell hidden"' in html
     assert 'id="reelPreviewControls" class="asset-preview-controls hidden"' in html
-    assert 'id="reelPreviewToggleBtn" type="button" class="ghost" disabled' in html
+    assert 'id="reelPreviewToggleBtn" type="button" class="btn-ghost" disabled' in html
     assert "Preview will appear after you prepare the reel." in html
     assert "Prepare Reel Versions" in html
-    assert "Prepare Download Versions" in html
     assert "Also prepare a captioned download" in html
     assert "window.SpeechRecognition || window.webkitSpeechRecognition" in html
     assert "Speech dictation is not available in this browser." in html
     assert "function clearReelPreview()" in html
     assert "clearReelPreview();" in html
+    assert 'fd.append("response_mode", "json");' in html
+    assert 'captionedFd.append("source_asset_id", reelAssetId);' in html
     assert 'captionedFd.append("narration_text", getFullNarration());' in html
 
 

@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 import json
 import tempfile
 from pathlib import Path
+from uuid import uuid4
 
 from fastapi import APIRouter, Body, File, Form, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
@@ -26,6 +28,24 @@ from app.providers import (
 from app.schemas import TimedTextSegment
 
 router = APIRouter()
+
+_MAX_REEL_DOWNLOADS = 8
+_REEL_DOWNLOADS: dict[str, tuple[bytes, str, str]] = {}
+_REEL_DOWNLOAD_ORDER: deque[str] = deque()
+
+
+def _store_reel_download(source_path: Path, *, filename: str) -> tuple[str, str]:
+    asset_id = uuid4().hex
+    _REEL_DOWNLOADS[asset_id] = (source_path.read_bytes(), "video/mp4", filename)
+    _REEL_DOWNLOAD_ORDER.append(asset_id)
+    while len(_REEL_DOWNLOAD_ORDER) > _MAX_REEL_DOWNLOADS:
+        stale_asset_id = _REEL_DOWNLOAD_ORDER.popleft()
+        _REEL_DOWNLOADS.pop(stale_asset_id, None)
+    return asset_id, f"/v1/reel/downloads/{asset_id}"
+
+
+def _get_reel_download_payload(asset_id: str) -> tuple[bytes, str, str] | None:
+    return _REEL_DOWNLOADS.get(asset_id)
 
 _REEL_UI_HTML = """<!doctype html>
 <html lang="en">
@@ -297,8 +317,6 @@ _REEL_UI_HTML = """<!doctype html>
       <a id="downloadCaptionedReel" class="download-link hidden" href="#" download="reel-captioned.mp4">Download Reel With Captions</a>
     </div>
   </div>
-"""
-
   <script>
     const exampleVideoFile = document.getElementById("exampleVideoFile");
     const analyzeStyleBtn = document.getElementById("analyzeStyleBtn");
@@ -400,14 +418,8 @@ _REEL_UI_HTML = """<!doctype html>
       finalReel.pause();
       finalReel.removeAttribute("src");
       finalReel.load();
-      if (reelObjectUrl) {
-        URL.revokeObjectURL(reelObjectUrl);
-        reelObjectUrl = null;
-      }
-      if (captionedReelObjectUrl) {
-        URL.revokeObjectURL(captionedReelObjectUrl);
-        captionedReelObjectUrl = null;
-      }
+      reelObjectUrl = null;
+      captionedReelObjectUrl = null;
       downloadReel.href = "#";
       downloadReel.classList.add("hidden");
       downloadCaptionedReel.href = "#";
@@ -952,16 +964,21 @@ _REEL_UI_HTML = """<!doctype html>
           for (let i = 0; i < files.length; i++) fd.append("clips", files[i]);
           fd.append("voiceover", voiceoverBlob, "voiceover.mp3");
           fd.append("captions_enabled", "false");
+          fd.append("response_mode", "json");
           const response = await fetch("/v1/reel/assemble", { method: "POST", body: fd });
           if (!response.ok) {
             const data = await response.json().catch(() => ({}));
             throw new Error(data.error || response.statusText);
           }
-          return response.blob();
+          return response.json();
         }
 
-        const reelBlob = await requestPlainReel();
-        reelObjectUrl = URL.createObjectURL(reelBlob);
+        const reelPayload = await requestPlainReel();
+        const reelAssetId = reelPayload.asset_id || "";
+        reelObjectUrl = reelPayload.download_url || "";
+        if (!reelAssetId || !reelObjectUrl) {
+          throw new Error("The reel download could not be prepared");
+        }
         finalReel.src = reelObjectUrl;
         finalReel.currentTime = 0;
         finalReel.pause();
@@ -978,16 +995,20 @@ _REEL_UI_HTML = """<!doctype html>
 
         try {
           const captionedFd = new FormData();
-          captionedFd.append("video", reelBlob, "reel.mp4");
+          captionedFd.append("source_asset_id", reelAssetId);
           captionedFd.append("voiceover", voiceoverBlob, "voiceover.mp3");
           captionedFd.append("narration_text", getFullNarration());
+          captionedFd.append("response_mode", "json");
           const captionedResponse = await fetch("/v1/reel/caption-video", { method: "POST", body: captionedFd });
           if (!captionedResponse.ok) {
             const data = await captionedResponse.json().catch(() => ({}));
             throw new Error(data.error || captionedResponse.statusText);
           }
-          const captionedReelBlob = await captionedResponse.blob();
-          captionedReelObjectUrl = URL.createObjectURL(captionedReelBlob);
+          const captionedPayload = await captionedResponse.json();
+          captionedReelObjectUrl = captionedPayload.download_url || "";
+          if (!captionedReelObjectUrl) {
+            throw new Error("The captioned reel download could not be prepared");
+          }
           downloadCaptionedReel.href = captionedReelObjectUrl;
           downloadCaptionedReel.download = "reel-captioned.mp4";
           downloadCaptionedReel.classList.remove("hidden");
@@ -1039,6 +1060,22 @@ def reel_generator_ui() -> HTMLResponse:
             "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
             "Pragma": "no-cache",
             "Expires": "0",
+        },
+    )
+
+
+@router.get("/v1/reel/downloads/{asset_id}")
+def get_reel_download(asset_id: str):
+    asset = _get_reel_download_payload(asset_id)
+    if asset is None:
+        return JSONResponse({"error": "Reel download is unavailable"}, status_code=404)
+    payload, media_type, filename = asset
+    return Response(
+        content=payload,
+        media_type=media_type,
+        headers={
+            "Cache-Control": "no-store",
+            "Content-Disposition": f'inline; filename="{filename}"',
         },
     )
 
@@ -1265,9 +1302,11 @@ async def render_reel_captions_overlay(
 
 @router.post("/v1/reel/caption-video", response_model=None)
 async def render_reel_with_captions(
-    video: UploadFile = File(...),
+    video: UploadFile | None = File(default=None),
     voiceover: UploadFile = File(...),
     narration_text: str = Form(default=""),
+    source_asset_id: str = Form(default=""),
+    response_mode: str = Form(default="file"),
 ):
     """Burn captions onto an already assembled reel."""
     settings = get_settings()
@@ -1279,7 +1318,18 @@ async def render_reel_with_captions(
     output_path = Path(temp_dir) / "reel-captioned.mp4"
 
     try:
-        input_video_path.write_bytes(await video.read())
+        normalized_source_asset_id = source_asset_id.strip()
+        normalized_response_mode = response_mode.strip().lower()
+        if normalized_source_asset_id:
+            asset = _get_reel_download_payload(normalized_source_asset_id)
+            if asset is None:
+                return JSONResponse({"error": "The plain reel is no longer available"}, status_code=400)
+            payload, _media_type, _filename = asset
+            input_video_path.write_bytes(payload)
+        elif video is not None:
+            input_video_path.write_bytes(await video.read())
+        else:
+            return JSONResponse({"error": "video or source_asset_id is required"}, status_code=400)
 
         voiceover_suffix = Path(voiceover.filename or "voiceover").suffix or ".mp3"
         voiceover_path = Path(temp_dir) / f"voiceover{voiceover_suffix}"
@@ -1335,6 +1385,11 @@ async def render_reel_with_captions(
 
             shutil.rmtree(temp_dir, ignore_errors=True)
 
+        if normalized_response_mode == "json":
+            _asset_id, download_url = _store_reel_download(output_path, filename="reel-captioned.mp4")
+            cleanup()
+            return JSONResponse({"download_url": download_url})
+
         return FileResponse(
             str(output_path),
             media_type="video/mp4",
@@ -1353,6 +1408,7 @@ async def assemble_reel(
     clips: list[UploadFile] = File(..., alias="clips"),
     voiceover: UploadFile = File(...),
     captions_enabled: bool = Form(default=True),
+    response_mode: str = Form(default="file"),
 ):
     """Assemble B-roll clips with voiceover into final reel."""
     if not clips:
@@ -1368,6 +1424,7 @@ async def assemble_reel(
     captioned_output_path = Path(temp_dir) / "reel-captioned.mp4"
 
     try:
+        normalized_response_mode = response_mode.strip().lower()
         for i, clip in enumerate(clips):
             suffix = Path(clip.filename or "clip").suffix or ".mp4"
             path = Path(temp_dir) / f"clip_{i}{suffix}"
@@ -1427,6 +1484,14 @@ async def assemble_reel(
         def cleanup():
             import shutil
             shutil.rmtree(temp_dir, ignore_errors=True)
+
+        if normalized_response_mode == "json":
+            asset_id, download_url = _store_reel_download(
+                final_output_path,
+                filename="reel-captioned.mp4" if captions_enabled else "reel.mp4",
+            )
+            cleanup()
+            return JSONResponse({"asset_id": asset_id, "download_url": download_url})
 
         return FileResponse(
             str(final_output_path),
