@@ -35,307 +35,269 @@ _REEL_UI_HTML = """<!doctype html>
   <title>AI Reel Generator</title>
   <style>
     :root {
-      --bg: #0b1020;
-      --panel: #121a2c;
-      --panel-strong: #18233a;
-      --text: #e7eefc;
-      --muted: #9fb0d1;
-      --border: #2a385a;
-      --brand: #4f7cff;
-      --brand-hover: #3e68e6;
-      --ok: #25c281;
+      --bg: #ffffff;
+      --panel: #fcfcfc;
+      --text: #000000;
+      --muted: #737373;
+      --border: #e5e5e5;
+      --brand: #000000;
+      --brand-hover: #333333;
+      --ok: #16a34a;
+      --err: #ef4444;
     }
     * { box-sizing: border-box; }
     body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      max-width: 720px;
+      font-family: 'Inter', system-ui, -apple-system, sans-serif;
+      max-width: 800px;
       margin: 0 auto;
-      padding: 24px 16px 36px;
-      background: radial-gradient(circle at top right, #172442 0%, var(--bg) 40%);
+      padding: 0 32px 80px;
+      background: var(--bg);
       color: var(--text);
+      line-height: 1.5;
+      -webkit-font-smoothing: antialiased;
     }
-    nav { margin-bottom: 20px; }
-    nav a { color: var(--muted); text-decoration: none; }
-    nav a:hover { color: var(--brand); }
-    h1 { margin: 0 0 8px; font-size: 24px; }
-    h3 { margin: 0 0 10px; color: #dce7ff; font-size: 16px; }
-    .card {
-      border: 1px solid var(--border);
-      background: linear-gradient(180deg, var(--panel) 0%, #11192b 100%);
-      border-radius: 12px;
-      padding: 14px;
-      margin: 14px 0;
+    nav { 
+      padding: 32px 0; 
+      margin-bottom: 40px;
+      display: flex;
+      gap: 24px;
     }
-    label { display: block; font-size: 13px; margin-bottom: 6px; color: #c9d8f8; }
-    textarea {
-      width: 100%;
-      min-height: 80px;
-      padding: 10px;
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      background: var(--panel-strong);
-      color: var(--text);
-      resize: vertical;
+    nav a { 
+      text-decoration: none; 
+      color: var(--muted); 
+      font-size: 14px;
+      font-weight: 500;
     }
-    input[type="file"] { padding: 6px 0; color: var(--muted); }
-    button {
-      padding: 8px 14px;
-      border: 1px solid var(--brand);
-      border-radius: 8px;
-      background: var(--brand);
-      color: white;
-      cursor: pointer;
-      font-weight: 600;
-      margin-right: 8px;
-      margin-top: 6px;
-    }
-    button:hover { background: var(--brand-hover); }
-    button:disabled { opacity: 0.5; cursor: not-allowed; }
-    .ghost { background: transparent; color: #ccdbff; border-color: #5371b7; }
-    .ghost:hover { background: rgba(79, 124, 255, 0.12); }
-    .ghost:disabled { background: transparent; }
-    .hidden { display: none !important; }
-    .download-link.hidden { display: none; }
-    .script-section { margin: 10px 0; }
-    .script-section label { font-weight: 600; }
-    .script-section [contenteditable] {
-      min-height: 24px;
-      padding: 8px;
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      background: var(--panel-strong);
-    }
-    .status { font-size: 13px; color: var(--muted); margin-top: 6px; }
+    nav a.active, nav a:hover { color: var(--text); }
+    
+    h1 { margin: 0 0 8px; font-size: 32px; font-weight: 700; letter-spacing: -0.02em; }
+    .status { font-size: 14px; color: var(--muted); margin-bottom: 48px; }
     .status.ok { color: var(--ok); }
-    .status.err { color: #ff6b6b; }
-    .step { margin-bottom: 24px; }
-    .dictation-row {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 10px;
-    }
-    .dictation-row label { margin-bottom: 0; }
-    .dictation-btn {
-      min-width: 128px;
-      margin-top: 0;
-      padding: 6px 10px;
-      font-size: 12px;
-    }
-    .dictation-btn.active {
-      background: rgba(37, 194, 129, 0.18);
-      border-color: var(--ok);
-      color: #d8ffe9;
-      box-shadow: 0 0 0 1px rgba(37, 194, 129, 0.25);
-    }
-    .dictation-btn:disabled {
-      background: transparent;
-      border-color: var(--border);
-      color: var(--muted);
-    }
-    .dictation-helper {
-      margin-top: 8px;
-      font-size: 12px;
-      color: var(--muted);
-    }
-    .hook-grid {
-      display: grid;
-      gap: 10px;
-      margin-top: 14px;
-    }
-    .hook-card {
-      border: 1px solid var(--border);
-      border-radius: 10px;
-      padding: 12px;
-      background: rgba(24, 35, 58, 0.7);
-    }
-    .hook-card.selected {
-      border-color: var(--brand);
-      box-shadow: 0 0 0 1px rgba(79, 124, 255, 0.35);
-    }
-    .hook-card p {
-      margin: 0 0 8px;
-      line-height: 1.45;
-    }
-    .hook-meta {
-      font-size: 12px;
-      color: var(--muted);
-      margin-bottom: 8px;
-    }
-    .hook-source {
-      color: #bfd0ff;
-      font-size: 12px;
-      text-decoration: none;
-    }
-    .hook-source:hover { color: white; }
-    .asset-preview-shell {
-      width: min(100%, 420px);
-      aspect-ratio: 9 / 16;
-      margin: 14px auto 0;
-      border-radius: 16px;
-      overflow: hidden;
-      background: #000;
-      border: 1px solid rgba(83, 113, 183, 0.45);
-      box-shadow: inset 0 0 0 1px rgba(10, 15, 30, 0.4);
-    }
-    .asset-preview-shell video {
+    .status.err { color: var(--err); }
+    
+    h2 { font-size: 20px; font-weight: 600; margin: 56px 0 24px; color: var(--text); padding-bottom: 12px; border-bottom: 1px solid var(--border); }
+    h3 { margin: 0 0 8px; font-size: 13px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; }
+    
+    label { display: block; font-size: 14px; font-weight: 500; margin-bottom: 8px; color: var(--text); }
+    .input-group { margin-bottom: 24px; position: relative; }
+    
+    input[type="text"], select, textarea {
       width: 100%;
-      height: 100%;
-      margin-top: 0;
-      border-radius: 0;
-      object-fit: cover;
-      background: #000;
-    }
-    .asset-preview-controls {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      gap: 12px;
-      margin-top: 10px;
-    }
-    .asset-preview-empty {
-      margin-top: 14px;
-      padding: 12px;
-      border: 1px dashed rgba(83, 113, 183, 0.45);
-      border-radius: 12px;
-      background: rgba(14, 21, 37, 0.65);
-      color: var(--muted);
-      text-align: center;
-      font-size: 13px;
-    }
-    .checkbox-row {
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-      margin-top: 10px;
-      color: #c9d8f8;
-      cursor: pointer;
-    }
-    .checkbox-row input[type="checkbox"] {
-      margin: 0;
-      accent-color: var(--brand);
-    }
-    .asset-links {
-      display: flex;
-      flex-wrap: wrap;
-      justify-content: center;
-      gap: 16px;
-      margin-top: 12px;
-    }
-    select {
-      padding: 8px 10px;
+      padding: 12px 16px;
       border: 1px solid var(--border);
-      border-radius: 8px;
-      background: var(--panel-strong);
+      border-radius: 4px;
+      background: #ffffff;
       color: var(--text);
-      min-width: 200px;
+      font-family: inherit;
+      font-size: 15px;
     }
-    audio, video { width: 100%; max-width: 100%; border-radius: 8px; margin-top: 8px; }
+    input[type="text"]:focus, select:focus, textarea:focus { border-color: #a3a3a3; outline: none; }
+    
+    /* Notion block style for textareas */
+    textarea.notion-block {
+      border: none;
+      border-left: 2px solid var(--border);
+      border-radius: 0;
+      padding: 8px 16px;
+      background: transparent;
+      font-size: 16px;
+      min-height: 120px;
+    }
+    textarea.notion-block:focus { border-left-color: var(--text); }
+    
+    .file-dropzone { border: 1px dashed var(--border); border-radius: 4px; padding: 12px; display: flex; align-items: center; background: #ffffff; }
+    input[type="file"] { width: 100%; font-size: 14px; color: var(--muted); }
+    input[type="file"]::file-selector-button {
+      background: #ffffff; border: 1px solid var(--border); color: var(--text);
+      padding: 6px 16px; border-radius: 4px; cursor: pointer; margin-right: 16px; font-size: 13px; font-weight: 500;
+    }
+    input[type="file"]::file-selector-button:hover { background: var(--panel); }
+    
+    button { display: inline-flex; align-items: center; justify-content: center; padding: 10px 20px; border-radius: 4px; font-size: 14px; font-weight: 500; cursor: pointer; white-space: nowrap; }
+    .btn-primary { background: var(--brand); color: #ffffff; border: 1px solid var(--brand); }
+    .btn-primary:hover { background: var(--brand-hover); }
+    .btn-primary:disabled { opacity: 0.5; }
+    
+    .btn-ghost { background: #ffffff; color: var(--text); border: 1px solid var(--border); }
+    .btn-ghost:hover:not(:disabled) { background: #f5f5f5; border-color: #d4d4d4;}
+    .btn-ghost:disabled { opacity: 0.5; }
+    
+    .dictation-btn {
+      position: absolute; right: 16px; bottom: 16px; padding: 6px 12px; font-size: 12px; border-radius: 4px;
+      background: #ffffff; border: 1px solid var(--border); color: var(--text);
+    }
+    .dictation-btn.active { background: #fee2e2; border-color: #ef4444; color: #b91c1c; }
+    
+    .hook-grid { display: flex; flex-direction: column; gap: 12px; margin-top: 24px; }
+    .hook-card { border: 1px solid var(--border); border-radius: 4px; padding: 16px; cursor: pointer; background: #ffffff; }
+    .hook-card:hover { border-color: #a3a3a3; }
+    .hook-card.selected { border-color: var(--text); box-shadow: 0 0 0 1px var(--text); }
+    .hook-card p { margin: 0 0 8px; font-size: 15px; }
+    .hook-meta { font-size: 13px; color: var(--muted); margin-bottom: 8px; }
+    .hook-source { color: var(--text); font-size: 13px; text-decoration: underline; }
+    
+    .script-section { margin-bottom: 32px; }
+    .script-section [contenteditable] {
+      min-height: 24px; padding: 8px 0; border: none; outline: none; font-size: 16px; line-height: 1.6; color: var(--text);
+    }
+    .script-section [contenteditable]:focus { border-bottom: 1px solid var(--border); }
+    .script-section [contenteditable]:empty:before { content: attr(placeholder); color: #a3a3a3; font-style: italic; }
+    
+    .checkbox-row { display: inline-flex; align-items: center; gap: 12px; cursor: pointer; font-size: 15px; }
+    .checkbox-row input[type="checkbox"] { accent-color: var(--brand); width: 18px; height: 18px; }
+    
+    .asset-preview-shell { width: 100%; max-width: 420px; aspect-ratio: 9 / 16; margin: 32px auto 0; border-radius: 8px; overflow: hidden; background: #000; border: 1px solid var(--border); box-shadow: 0 4px 24px rgba(0,0,0,0.08); }
+    .asset-preview-shell video { width: 100%; height: 100%; object-fit: cover; display: block; }
+    .asset-preview-controls { display: flex; align-items: center; justify-content: center; gap: 16px; margin-top: 16px; }
+    .asset-preview-empty { margin-top: 32px; padding: 24px; border: 1px dashed var(--border); border-radius: 4px; color: var(--muted); text-align: center; font-size: 14px; background: #fafafa; }
+    
+    .asset-links { display: flex; flex-direction: column; align-items: center; gap: 12px; margin-top: 24px; }
+    .download-link { color: var(--text); text-decoration: underline; font-size: 14px; font-weight: 500; }
+    
+    audio { width: 100%; margin-top: 16px; }
+    .hidden { display: none !important; }
+    
+    #stylePreview { margin-top: 16px; padding: 16px; border-left: 2px solid var(--border); font-size: 14px; color: var(--muted); white-space: pre-wrap; background: #fafafa; }
   </style>
 </head>
 <body>
-  <nav><a href="/">← Transcript & Auto-Cut</a> | <a href="/reel-generator">Reel Generator</a></nav>
+  <nav>
+    <a href="/">Transcript & Auto-Cut</a>
+    <a href="/reel-generator" class="active" style="color:var(--text); font-weight:600;">Reel Generator</a>
+  </nav>
+
   <h1>AI Reel Generator</h1>
   <p class="status">Create viral Instagram Reels with AI-generated scripts and your cloned voice.</p>
 
-  <div class="step">
-    <div class="card">
-      <h3>Step 1: Voice Setup</h3>
+  <div id="step1">
+    <h2>1. Voice Setup</h2>
+    
+    <div class="input-group">
       <label>Upload 1–3 voice samples (MP3/WAV, 1+ min total recommended)</label>
-      <input type="file" id="voiceFiles" accept="audio/*" multiple />
-      <br />
-      <label>Voice name</label>
-      <input type="text" id="voiceName" placeholder="My Voice" value="My Voice" />
-      <br />
-      <button id="cloneVoiceBtn" type="button">Clone My Voice</button>
-      <span id="voiceStatus" class="status"></span>
-      <br />
+      <div class="file-dropzone">
+        <input type="file" id="voiceFiles" accept="audio/*" multiple />
+      </div>
+    </div>
+    
+    <div style="display: flex; gap: 16px; align-items: flex-end; margin-bottom: 32px;">
+      <div style="flex: 1;">
+        <label>Voice name</label>
+        <input type="text" id="voiceName" placeholder="My Voice" value="My Voice" />
+      </div>
+      <button id="cloneVoiceBtn" type="button" class="btn-primary">Clone My Voice</button>
+    </div>
+    
+    <div class="input-group">
       <label>Or select existing voice</label>
-      <select id="voiceSelect">
-        <option value="">-- Load voices --</option>
-      </select>
-      <button id="loadVoicesBtn" type="button" class="btn-ghost">Refresh</button>
+      <div style="display: flex; gap: 16px;">
+        <select id="voiceSelect" style="flex: 1;">
+          <option value="">-- Load voices --</option>
+        </select>
+        <button id="loadVoicesBtn" type="button" class="btn-ghost">Refresh</button>
+      </div>
     </div>
+    <span id="voiceStatus" class="status" style="display: block; margin-top: -8px;"></span>
   </div>
 
-  <div class="step">
-    <div class="card">
-      <h3>Step 2: Idea + Hook Selection</h3>
-      <div class="dictation-row">
-        <label for="roughIdea">Rough idea / topic</label>
-        <button id="roughIdeaDictationBtn" type="button" class="btn-ghost dictation-btn" aria-pressed="false">
-          Start Dictation
-        </button>
-      </div>
-      <textarea id="roughIdea" placeholder="e.g. 5 productivity hacks that changed my life"></textarea>
-      <div class="dictation-helper">Use your microphone to dictate your rough idea.</div>
-      <div id="dictationStatus" class="status"></div>
+  <div id="step2">
+    <h2>2. Idea & Hook Selection</h2>
+    
+    <div class="input-group" style="padding-bottom: 24px; border-bottom: 1px solid var(--panel);">
       <label>Example video (optional — style reference)</label>
-      <input type="file" id="exampleVideoFile" accept="video/*,audio/*" />
-      <button id="analyzeStyleBtn" type="button" class="btn-ghost" disabled>Analyze Style</button>
+      <div style="display: flex; gap: 16px; align-items: center;">
+        <div class="file-dropzone" style="flex: 1;">
+          <input type="file" id="exampleVideoFile" accept="video/*,audio/*" />
+        </div>
+        <button id="analyzeStyleBtn" type="button" class="btn-ghost" disabled>Analyze Style</button>
+      </div>
       <span id="styleStatus" class="status"></span>
-      <div id="stylePreview" style="display:none; margin-top:8px; padding:10px; border:1px solid var(--border); border-radius:8px; background:var(--panel-strong); font-size:13px; color:var(--muted); white-space:pre-wrap;"></div>
+      <div id="stylePreview" style="display:none;"></div>
+    </div>
+
+    <div class="input-group" style="margin-top: 32px;">
+      <label for="roughIdea">Rough idea / topic</label>
+      <div style="position: relative;">
+        <textarea id="roughIdea" class="notion-block" placeholder="e.g. 5 productivity hacks that changed my life"></textarea>
+        <button id="roughIdeaDictationBtn" type="button" class="dictation-btn" aria-pressed="false">Start Dictation</button>
+      </div>
+      <div id="dictationStatus" class="status" style="margin-top: 8px;"></div>
+    </div>
+    
+    <div class="input-group">
       <label>B-roll clips (5–6 videos, in order)</label>
-      <input type="file" id="brollFiles" accept="video/*" multiple />
-      <br />
-      <button id="suggestHooksBtn" type="button">Suggest Hooks</button>
-      <button id="generateScriptBtn" type="button" disabled>Generate Script</button>
-      <span id="scriptStatus" class="status"></span>
-      <div id="hookSuggestions" class="hook-grid" style="display:none"></div>
+      <div class="file-dropzone">
+        <input type="file" id="brollFiles" accept="video/*" multiple />
+      </div>
     </div>
+    
+    <div style="display: flex; gap: 16px; margin-top: 32px;">
+      <button id="suggestHooksBtn" type="button" class="btn-ghost">Suggest Hooks</button>
+      <button id="generateScriptBtn" type="button" class="btn-primary" disabled>Generate Script</button>
+    </div>
+    <span id="scriptStatus" class="status" style="display: block; margin-top: 12px;"></span>
+    
+    <div id="hookSuggestions" class="hook-grid" style="display:none"></div>
   </div>
 
-  <div class="step" id="scriptStep" style="display:none">
-    <div class="card">
-      <h3>Step 3: Script Review</h3>
-      <div class="script-section">
-        <label>Hook</label>
-        <div id="scriptHook" contenteditable="true"></div>
-      </div>
-      <div class="script-section">
-        <label>Body</label>
-        <div id="scriptBody" contenteditable="true"></div>
-      </div>
-      <div class="script-section">
-        <label>CTA</label>
-        <div id="scriptCta" contenteditable="true"></div>
-      </div>
-      <div class="script-section">
-        <label>Hashtags</label>
-        <div id="scriptHashtags" contenteditable="true"></div>
-      </div>
+  <div id="scriptStep" style="display:none">
+    <h2>3. Script Review</h2>
+    
+    <div class="script-section">
+      <h3>Hook</h3>
+      <div id="scriptHook" contenteditable="true" placeholder="Your hook goes here..."></div>
+    </div>
+    <div class="script-section">
+      <h3>Body</h3>
+      <div id="scriptBody" contenteditable="true" placeholder="Your script body... (separate scenes with line breaks)"></div>
+    </div>
+    <div class="script-section">
+      <h3>Call to Action</h3>
+      <div id="scriptCta" contenteditable="true" placeholder="Call to action..."></div>
+    </div>
+    <div class="script-section">
+      <h3>Hashtags</h3>
+      <div id="scriptHashtags" contenteditable="true" placeholder="#hashtags"></div>
+    </div>
+    
+    <div style="display: flex; gap: 16px; margin-top: 40px;">
       <button id="regenerateScriptBtn" type="button" class="btn-ghost">Regenerate</button>
-      <button id="generateVoiceoverBtn" type="button">Generate Voiceover</button>
-      <span id="voiceoverStatus" class="status"></span>
-      <br />
-      <audio id="voiceoverAudio" controls style="margin-top:10px"></audio>
+      <button id="generateVoiceoverBtn" type="button" class="btn-primary">Generate Voiceover</button>
     </div>
+    <span id="voiceoverStatus" class="status" style="display: block; margin-top: 12px;"></span>
+    
+    <audio id="voiceoverAudio" controls></audio>
   </div>
 
-  <div class="step" id="assembleStep" style="display:none">
-    <div class="card">
-      <h3>Step 4: Prepare Download Versions</h3>
-      <button id="assembleBtn" type="button">Prepare Reel Versions</button>
+  <div id="assembleStep" style="display:none">
+    <h2>4. Final Assembly</h2>
+    
+    <div style="display: flex; flex-direction: column; align-items: flex-start; gap: 24px;">
       <label class="checkbox-row" for="includeCaptionedVersion">
         <input id="includeCaptionedVersion" type="checkbox" checked />
-        Also prepare a captioned download
+        <span>Also prepare a captioned download version</span>
       </label>
-      <br />
-      <span id="assembleStatus" class="status"></span>
-      <div id="reelPreviewEmpty" class="asset-preview-empty">Preview will appear after you prepare the reel.</div>
-      <div id="reelPreviewShell" class="asset-preview-shell hidden" aria-hidden="true">
-        <video id="finalReel" preload="metadata" playsinline></video>
-      </div>
-      <div id="reelPreviewControls" class="asset-preview-controls hidden">
-        <button id="reelPreviewToggleBtn" type="button" class="btn-ghost" disabled>Play Preview</button>
-        <span id="reelPreviewTime" class="status">0:00 / 0:00</span>
-      </div>
-      <div class="asset-links">
-        <a id="downloadReel" class="download-link hidden" href="#" download="reel.mp4" style="color:var(--brand)">Download B-roll Reel</a>
-        <a id="downloadCaptionedReel" class="download-link hidden" href="#" download="reel-captioned.mp4" style="color:var(--brand)">Download Reel With Captions</a>
-      </div>
+      
+      <button id="assembleBtn" type="button" class="btn-primary">Prepare Reel Versions</button>
+    </div>
+    <span id="assembleStatus" class="status" style="display: block; margin-top: 12px;"></span>
+    
+    <div id="reelPreviewEmpty" class="asset-preview-empty">Preview will appear after you prepare the reel.</div>
+    
+    <div id="reelPreviewShell" class="asset-preview-shell hidden" aria-hidden="true">
+      <video id="finalReel" preload="metadata" playsinline></video>
+    </div>
+    
+    <div id="reelPreviewControls" class="asset-preview-controls hidden">
+      <button id="reelPreviewToggleBtn" type="button" class="btn-ghost" disabled>Play Preview</button>
+      <span id="reelPreviewTime" class="status" style="margin: 0; font-variant-numeric: tabular-nums;">0:00 / 0:00</span>
+    </div>
+    
+    <div class="asset-links">
+      <a id="downloadReel" class="download-link hidden" href="#" download="reel.mp4">Download B-roll Reel</a>
+      <a id="downloadCaptionedReel" class="download-link hidden" href="#" download="reel-captioned.mp4">Download Reel With Captions</a>
     </div>
   </div>
+"""
 
   <script>
     const exampleVideoFile = document.getElementById("exampleVideoFile");

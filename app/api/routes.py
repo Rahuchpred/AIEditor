@@ -216,593 +216,348 @@ def ui_playground() -> str:
   <title>AIEdit API Playground</title>
   <style>
     :root {
-      --bg: #0b1020;
-      --panel: #121a2c;
-      --panel-strong: #18233a;
-      --text: #e7eefc;
-      --muted: #9fb0d1;
-      --border: #2a385a;
-      --brand: #4f7cff;
-      --brand-hover: #3e68e6;
-      --ok: #25c281;
+      --bg: #ffffff;
+      --panel: #fcfcfc;
+      --text: #000000;
+      --muted: #737373;
+      --border: #e5e5e5;
+      --brand: #000000;
+      --brand-hover: #333333;
+      --ok: #16a34a;
     }
     * { box-sizing: border-box; }
     body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      max-width: 980px;
+      font-family: 'Inter', system-ui, -apple-system, sans-serif;
+      max-width: 1000px;
       margin: 0 auto;
-      padding: 24px 16px 36px;
-      background: radial-gradient(circle at top right, #172442 0%, var(--bg) 40%);
+      padding: 0;
+      background: var(--bg);
       color: var(--text);
+      display: flex;
+      flex-direction: column;
+      min-height: 100vh;
+      -webkit-font-smoothing: antialiased;
     }
-    h1 { margin: 0 0 8px; font-size: 28px; }
-    h3 { margin: 0 0 10px; color: #dce7ff; }
-    .subtitle { color: var(--muted); margin-bottom: 14px; display: block; }
-    .badge {
-      display: inline-flex;
+    nav { 
+      padding: 24px 32px; 
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      gap: 24px;
+    }
+    nav a { 
+      text-decoration: none; 
+      color: var(--muted); 
+      font-size: 14px;
+      font-weight: 500;
+    }
+    nav a.active, nav a:hover { color: var(--text); }
+    .layout-container {
+      display: flex;
+      flex: 1;
+    }
+    .left-col {
+      width: 400px;
+      min-width: 400px;
+      border-right: 1px solid var(--border);
+      padding: 32px;
+      background: var(--bg);
+    }
+    .right-col {
+      flex: 1;
+      padding: 32px 48px;
+      background: var(--panel);
+      display: flex;
+      flex-direction: column;
       align-items: center;
-      gap: 6px;
-      font-size: 12px;
-      color: #d9ffe9;
-      background: rgba(37, 194, 129, 0.15);
-      border: 1px solid rgba(37, 194, 129, 0.45);
-      padding: 4px 10px;
-      border-radius: 999px;
-      margin-bottom: 10px;
     }
-    .card {
+    h1 { margin: 0 0 8px; font-size: 24px; font-weight: 600; letter-spacing: -0.02em; }
+    .subtitle { color: var(--muted); margin-bottom: 32px; font-size: 14px; line-height: 1.5; }
+    
+    .section { margin-bottom: 40px; }
+    h3 { margin: 0 0 16px; font-size: 13px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+    
+    label { display: block; font-size: 14px; font-weight: 500; margin-bottom: 8px; }
+    .input-group { margin-bottom: 24px; }
+    
+    input[type="text"], input[type="number"], select, textarea {
+      width: 100%;
+      padding: 10px 12px;
       border: 1px solid var(--border);
-      background: linear-gradient(180deg, var(--panel) 0%, #11192b 100%);
-      border-radius: 12px;
-      padding: 14px;
-      margin: 14px 0;
-      box-shadow: 0 8px 20px rgba(5, 9, 20, 0.35);
-    }
-    .row { display: flex; gap: 12px; flex-wrap: wrap; }
-    label { display: block; font-size: 13px; margin-bottom: 6px; color: #c9d8f8; }
-    input[type="text"], select {
-      width: 260px;
-      padding: 8px 10px;
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      background: var(--panel-strong);
+      border-radius: 4px;
+      background: #ffffff;
       color: var(--text);
+      font-family: inherit;
+      font-size: 14px;
+    }
+    input[type="text"]:focus, input[type="number"]:focus, select:focus, textarea:focus {
+      border-color: #a3a3a3;
       outline: none;
     }
-    input[type="text"]::placeholder { color: #8da0c4; }
-    input[type="text"]:focus, select:focus {
-      border-color: #4d79ff;
-      box-shadow: 0 0 0 3px rgba(79, 124, 255, 0.2);
+    
+    .file-dropzone {
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 8px;
+      background: #ffffff;
     }
-    input[type="file"] { padding: 6px 0; color: var(--muted); }
-    input[type="checkbox"] { accent-color: var(--brand); }
-    button {
-      padding: 8px 12px;
-      border: 1px solid var(--brand);
-      border-radius: 8px;
-      background: var(--brand);
-      color: white;
+    input[type="file"] { width: 100%; font-size: 13px; color: var(--muted); }
+    input[type="file"]::file-selector-button {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 4px 12px;
+      border-radius: 4px;
       cursor: pointer;
-      font-weight: 600;
+      margin-right: 12px;
     }
-    button:hover { background: var(--brand-hover); }
-    .ghost {
-      background: transparent;
-      color: #ccdbff;
-      border-color: #5371b7;
+    
+    .toggle-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 12px;
+      font-size: 14px;
+      color: var(--text);
+      cursor: pointer;
     }
-    .ghost:hover { background: rgba(79, 124, 255, 0.12); }
-    pre {
-      background: #091121;
-      color: #d9e6ff;
-      border: 1px solid #22345d;
-      padding: 12px;
-      border-radius: 8px;
-      overflow: auto;
-      min-height: 190px;
+    .toggle-row input[type="checkbox"] { accent-color: var(--brand); width: 16px; height: 16px; }
+    
+    button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 10px 16px;
+      border-radius: 4px;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
     }
-    #previewPanel { display: none; margin-bottom: 14px; }
-    #previewPanel.visible { display: block; }
-    .portrait-stage-card {
-      width: 100%;
-      max-width: 460px;
-      margin-left: auto;
-      margin-right: auto;
-    }
+    .btn-primary { background: var(--brand); color: #ffffff; border: 1px solid var(--brand); width: 100%; }
+    .btn-primary:hover { background: var(--brand-hover); }
+    .btn-primary:disabled { opacity: 0.5; }
+    
+    .btn-ghost { background: #ffffff; color: var(--text); border: 1px solid var(--border); }
+    .btn-ghost:hover:not(:disabled) { background: #f5f5f5; border-color: #d4d4d4; }
+    
+    .action-row { display: flex; gap: 8px; margin-top: 8px; }
+    .action-row button { flex: 1; }
+    
+    /* Previews & Stage */
+    .stage-header { display: flex; justify-content: flex-end; width: 100%; max-width: 420px; margin-bottom: 16px; gap: 8px; }
+    #previewPanel.visible { display: flex; flex-direction: column; width: 100%; align-items: center; }
+    #previewPanel { display: none; width: 100%; }
+    
     .preview-wrap {
       position: relative;
       width: 100%;
       max-width: 420px;
-      margin: 0 auto;
       aspect-ratio: 9 / 16;
-      background: #060d1a;
+      background: #000;
       border-radius: 8px;
       overflow: hidden;
-      border: 1px solid #22345d;
-    }
-    .preview-video {
-      width: 100%;
-      height: 100%;
-      object-fit: contain;
-      display: block;
-    }
-    .preview-placeholder {
-      position: absolute;
-      inset: 0;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      color: #5a6f96;
-      font-size: 14px;
-      pointer-events: none;
-    }
-    .preview-controls {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      margin-top: 10px;
-      width: 100%;
-      max-width: 420px;
-      margin-left: auto;
-      margin-right: auto;
-    }
-    .preview-controls button {
-      min-width: 70px;
-      padding: 6px 10px;
-      font-size: 13px;
-    }
-    .preview-time {
-      font-size: 12px;
-      color: var(--muted);
-      white-space: nowrap;
-      margin-left: auto;
-      font-variant-numeric: tabular-nums;
-    }
-    .tl-container {
-      position: relative;
-      height: 36px;
-      cursor: pointer;
-      user-select: none;
-      -webkit-user-select: none;
-      width: 100%;
-      max-width: 420px;
-      margin: 0 auto;
-    }
-    .tl-track {
-      position: absolute;
-      top: 14px;
-      left: 0;
-      right: 0;
-      height: 8px;
-      background: #1a2744;
-      border-radius: 4px;
-      overflow: hidden;
-    }
-    .tl-fill {
-      height: 100%;
-      width: 0%;
-      background: linear-gradient(90deg, var(--brand) 0%, #6b9aff 100%);
-      border-radius: 4px;
-      transition: width 0.05s linear;
-    }
-    .tl-playhead {
-      position: absolute;
-      top: 8px;
-      width: 18px;
-      height: 18px;
-      margin-left: -9px;
-      border-radius: 50%;
-      background: var(--brand);
-      border: 3px solid #e7eefc;
-      box-shadow: 0 0 6px rgba(79, 124, 255, 0.5);
-      left: 0%;
-      transition: left 0.05s linear;
-      z-index: 2;
-    }
-    .tl-playhead:hover, .tl-playhead.dragging {
-      transform: scale(1.25);
-      box-shadow: 0 0 12px rgba(79, 124, 255, 0.7);
-    }
-    .tl-hover-line {
-      position: absolute;
-      top: 10px;
-      width: 1px;
-      height: 16px;
-      background: rgba(255,255,255,0.3);
-      pointer-events: none;
-      display: none;
-      z-index: 1;
-    }
-    .tl-preview-overlay {
-      position: absolute;
-      bottom: 42px;
-      transform: translateX(-50%);
-      background: #0d1629;
-      border: 1px solid #2a385a;
-      border-radius: 6px;
-      padding: 4px;
-      pointer-events: none;
-      opacity: 0;
-      transition: opacity 0.15s ease;
-      z-index: 10;
-      box-shadow: 0 4px 16px rgba(0,0,0,0.5);
-    }
-    .tl-preview-overlay.show { opacity: 1; }
-    .tl-preview-canvas {
-      display: block;
-      border-radius: 4px;
-      background: #060d1a;
-    }
-    .tl-preview-time {
-      display: block;
-      text-align: center;
-      font-size: 11px;
-      color: var(--muted);
-      margin-top: 3px;
-      font-variant-numeric: tabular-nums;
-    }
-    .tl-cut-region {
-      position: absolute;
-      top: 11px;
-      height: 14px;
-      background: rgba(255, 55, 55, 0.45);
-      border-radius: 3px;
-      pointer-events: none;
-      z-index: 1;
-    }
-    .autocut-info {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      width: 100%;
-      max-width: 420px;
-      margin-bottom: 10px;
-      margin-left: auto;
-      margin-right: auto;
-      font-size: 13px;
-      color: var(--muted);
-    }
-    .autocut-info .cut-count {
-      color: #ff5c5c;
-      font-weight: 600;
-    }
-    .autocut-info .saved-time {
-      color: var(--ok);
-      font-weight: 600;
-    }
-    #captionEditorCard { display: none; }
-    #captionEditorCard.visible { display: block; }
-    .editor-stage {
-      width: 100%;
-      max-width: 420px;
-      margin: 0 auto;
-    }
-    .editor-preview-wrap {
-      position: relative;
-    }
-    .editor-caption-overlay {
-      position: absolute;
-      left: 50%;
-      bottom: 22%;
-      transform: translateX(-50%);
-      width: calc(100% - 36px);
-      padding: 0 8px;
-      text-align: center;
-      white-space: pre-line;
-      font-weight: 700;
-      font-size: clamp(22px, 4.5vw, 40px);
-      line-height: 1.2;
-      -webkit-text-stroke: 3px rgba(0, 0, 0, 0.95);
-      paint-order: stroke fill;
-      text-shadow: none;
-      pointer-events: none;
-      z-index: 3;
-    }
-    .editor-caption-overlay.hidden {
-      display: none;
-    }
-    .editor-controls {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      width: 100%;
-      max-width: 420px;
-      margin: 10px auto 0;
-    }
-    .editor-ruler {
-      position: relative;
-      height: 26px;
-      width: 100%;
-      max-width: 420px;
-      margin: 14px auto 0;
-      border-bottom: 1px solid rgba(122, 145, 196, 0.25);
-    }
-    .editor-ruler-tick {
-      position: absolute;
-      bottom: 0;
-      width: 1px;
-      height: 10px;
-      background: rgba(159, 176, 209, 0.35);
-    }
-    .editor-ruler-tick span {
-      position: absolute;
-      top: -16px;
-      left: 50%;
-      transform: translateX(-50%);
-      font-size: 10px;
-      color: var(--muted);
-      font-variant-numeric: tabular-nums;
-      white-space: nowrap;
-    }
-    .editor-timeline {
-      position: relative;
-      width: 100%;
-      max-width: 420px;
-      height: 72px;
-      margin: 8px auto 0;
-      border-radius: 10px;
-      border: 1px solid #22345d;
-      background: #0b1426;
-      overflow: hidden;
-      user-select: none;
-      -webkit-user-select: none;
-    }
-    .editor-track {
-      position: absolute;
-      inset: 0;
-    }
-    .editor-track-fill {
-      position: absolute;
-      inset: 0 auto 0 0;
-      width: 0%;
-      background: linear-gradient(90deg, rgba(79, 124, 255, 0.18) 0%, rgba(79, 124, 255, 0.04) 100%);
-      pointer-events: none;
-    }
-    .editor-track-playhead {
-      position: absolute;
-      top: 0;
-      bottom: 0;
-      width: 2px;
-      background: rgba(255, 255, 255, 0.75);
-      pointer-events: none;
-      z-index: 4;
-    }
-    .editor-track-hover {
-      position: absolute;
-      top: 0;
-      bottom: 0;
-      width: 1px;
-      background: rgba(255,255,255,0.28);
-      pointer-events: none;
-      display: none;
-      z-index: 3;
-    }
-    .caption-block {
-      position: absolute;
-      top: 18px;
-      height: 38px;
-      border-radius: 8px;
-      background: linear-gradient(180deg, #ff9b2d 0%, #de6f00 100%);
-      color: #fff7eb;
-      font-size: 12px;
-      font-weight: 700;
-      line-height: 38px;
-      padding: 0 10px;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      cursor: grab;
-      border: 1px solid rgba(255,255,255,0.14);
-      z-index: 2;
-    }
-    .caption-block.selected {
-      box-shadow: 0 0 0 2px rgba(231, 238, 252, 0.7);
-    }
-    .caption-block.dragging {
-      cursor: grabbing;
-      opacity: 0.95;
-    }
-    .caption-handle {
-      position: absolute;
-      top: 0;
-      width: 8px;
-      height: 100%;
-      background: rgba(0, 0, 0, 0.18);
-      cursor: ew-resize;
-    }
-    .caption-handle.start { left: 0; border-radius: 8px 0 0 8px; }
-    .caption-handle.end { right: 0; border-radius: 0 8px 8px 0; }
-    .editor-mini-preview {
-      bottom: 84px;
-    }
-    .cue-inspector {
-      width: 100%;
-      max-width: 420px;
-      margin: 14px auto 0;
-      padding: 12px;
-      border-radius: 10px;
-      border: 1px solid #22345d;
-      background: rgba(8, 16, 34, 0.85);
-    }
-    .cue-inspector textarea {
-      width: 100%;
-      min-height: 76px;
-      resize: vertical;
-      padding: 10px;
-      border-radius: 8px;
       border: 1px solid var(--border);
-      background: var(--panel-strong);
-      color: var(--text);
+      box-shadow: 0 4px 20px rgba(0,0,0,0.05);
     }
-    .cue-inspector-grid {
-      display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-      gap: 10px;
-      margin-top: 10px;
-    }
-    .cue-inspector input[type="number"],
-    .cue-inspector input[type="range"] {
-      width: 100%;
-    }
-    .cue-nav {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 10px;
-      margin-top: 10px;
-    }
-    .cue-nav-actions {
-      display: flex;
-      gap: 8px;
-    }
-    .cue-meta {
-      font-size: 12px;
-      color: var(--muted);
-      font-variant-numeric: tabular-nums;
-    }
-    .editor-status {
-      margin-top: 10px;
-      font-size: 12px;
-      color: var(--muted);
-    }
-    .editor-status.ok { color: var(--ok); }
-    .editor-status.err { color: #ff6b6b; }
-    .download-link {
-      display: inline-block;
-      margin-top: 12px;
-      color: #bfd0ff;
-      text-decoration: none;
-    }
-    .download-link.hidden { display: none; }
-    .download-link:hover { color: white; }
+    .preview-video { width: 100%; height: 100%; object-fit: contain; }
+    .preview-placeholder { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: #a3a3a3; font-size: 14px; }
+    
+    .preview-controls { display: flex; align-items: center; justify-content: space-between; width: 100%; max-width: 420px; margin-top: 16px; }
+    .preview-time { font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
+    
+    /* Timeline */
+    .tl-container { position: relative; height: 40px; cursor: pointer; user-select: none; width: 100%; max-width: 420px; margin: 16px auto 0; }
+    .tl-track { position: absolute; top: 18px; left: 0; right: 0; height: 4px; background: #e5e5e5; border-radius: 2px; }
+    .tl-fill { height: 100%; width: 0%; background: #a3a3a3; border-radius: 2px; }
+    .tl-playhead { position: absolute; top: 14px; width: 12px; height: 12px; margin-left: -6px; border-radius: 50%; background: #000; left: 0%; z-index: 2; border: 2px solid #fff; box-shadow: 0 0 0 1px #000; }
+    .tl-hover-line { position: absolute; top: 14px; width: 1px; height: 12px; background: #000; display: none; z-index: 1; }
+    
+    .tl-cut-region { position: absolute; top: 18px; height: 4px; background: rgba(239, 68, 68, 0.6); pointer-events: none; z-index: 1; }
+    
+    .tl-preview-overlay { position: absolute; bottom: 42px; transform: translateX(-50%); background: #fff; border: 1px solid var(--border); border-radius: 4px; padding: 4px; opacity: 0; z-index: 10; font-variant-numeric: tabular-nums; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
+    .tl-preview-overlay.show { opacity: 1; }
+    .tl-preview-canvas { display: block; border-radius: 2px; background: #000; }
+    .tl-preview-time { display: block; text-align: center; font-size: 11px; color: var(--muted); margin-top: 4px; }
+    
+    #captionEditorCard { display: none; width: 100%; flex-direction: column; align-items: center; }
+    #captionEditorCard.visible { display: flex; }
+    
+    .editor-timeline { position: relative; width: 100%; max-width: 420px; height: 60px; margin: 16px auto 0; border-radius: 4px; border: 1px solid var(--border); background: #ffffff; overflow: hidden; user-select: none; }
+    .editor-track-fill { position: absolute; inset: 0 auto 0 0; width: 0%; background: rgba(0, 0, 0, 0.03); pointer-events: none; }
+    .editor-track-playhead { position: absolute; top: 0; bottom: 0; width: 1px; background: #000; pointer-events: none; z-index: 4; }
+    .editor-track-hover { position: absolute; top: 0; bottom: 0; width: 1px; background: rgba(0,0,0,0.2); pointer-events: none; display: none; z-index: 3; }
+    
+    .caption-block { position: absolute; top: 10px; height: 40px; border-radius: 4px; background: #f4f4f5; color: #000; font-size: 11px; font-weight: 500; line-height: 40px; padding: 0 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: grab; border: 1px solid #d4d4d8; z-index: 2; }
+    .caption-block.selected { border-color: #000; background: #fff; box-shadow: 0 0 0 1px #000; }
+    .caption-handle { position: absolute; top: 0; width: 6px; height: 100%; background: transparent; cursor: ew-resize; }
+    .caption-handle:hover { background: rgba(0,0,0,0.05); }
+    .caption-handle.start { left: 0; }
+    .caption-handle.end { right: 0; }
+    
+    .editor-ruler { position: relative; height: 20px; width: 100%; max-width: 420px; margin: 24px auto 0; border-bottom: 1px solid var(--border); }
+    .editor-ruler-tick { position: absolute; bottom: 0; width: 1px; height: 6px; background: var(--border); }
+    .editor-ruler-tick span { position: absolute; top: -16px; left: 50%; transform: translateX(-50%); font-size: 10px; color: var(--muted); }
+    
+    .cue-inspector { width: 100%; max-width: 420px; margin: 32px auto 0; }
+    .cue-inspector textarea { min-height: 80px; margin-bottom: 16px; }
+    .cue-inspector-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 16px; }
+    input[type="range"] { width: 100%; accent-color: var(--brand); }
+    
+    .cue-nav { display: flex; align-items: center; justify-content: space-between; padding-top: 16px; margin-top: 16px; border-top: 1px solid var(--border); }
+    .cue-nav-actions { display: flex; gap: 8px; }
+    .cue-meta { font-size: 13px; color: var(--muted); }
+    
+    #out { background: #ffffff; border: 1px solid var(--border); color: var(--text); padding: 16px; border-radius: 4px; font-size: 13px; max-height: 200px; overflow: auto; margin-top: 24px; width: 100%; max-width: 420px; display: none; }
+    #out:not(:empty) { display: block; }
+    
+    .download-link { display: inline-block; margin-top: 16px; color: #000; text-decoration: underline; font-size: 14px; }
+    
+    .editor-caption-overlay { position: absolute; left: 50%; bottom: 22%; transform: translateX(-50%); width: calc(100% - 32px); text-align: center; white-space: pre-line; font-weight: 700; font-size: clamp(20px, 4vw, 36px); line-height: 1.2; -webkit-text-stroke: 3px rgba(0, 0, 0, 0.95); color: white; paint-order: stroke fill; pointer-events: none; z-index: 3; }
+    .hidden { display: none !important; }
   </style>
 </head>
 <body>
-  <nav style="margin-bottom:12px"><a href="/" style="color:var(--muted);text-decoration:none">Transcript & Auto-Cut</a> | <a href="/reel-generator" style="color:var(--muted);text-decoration:none">Reel Generator</a></nav>
-  <span class="badge">API playground</span>
-  <h1>AIEdit Test UI</h1>
-  <small class="subtitle">Use this page to test job creation, status polling, and result retrieval.</small>
+  <nav>
+    <a href="/" class="active" style="color:var(--text); font-weight:600;">Transcript & Auto-Cut</a>
+    <a href="/reel-generator">Reel Generator</a>
+  </nav>
 
-  <div class="card">
-    <h3>Create Analysis Job</h3>
-    <form id="createForm">
-      <div class="row">
-        <div>
-          <label for="media_file">Media File</label>
-          <input id="media_file" name="media_file" type="file" accept="audio/*,video/*" required />
+  <div class="layout-container">
+    <!-- LEFT COLUMN: Input & Config -->
+    <div class="left-col" id="leftPanel">
+      <h1>Transcript & Auto-Cut</h1>
+      <div class="subtitle">Upload footage to generate captions and automatically cut dead air.</div>
+
+      <div class="section">
+        <h3>Create Job</h3>
+        <form id="createForm">
+          <div class="input-group">
+            <label for="media_file">Media File</label>
+            <div class="file-dropzone">
+              <input id="media_file" name="media_file" type="file" accept="audio/*,video/*" required />
+            </div>
+          </div>
+          <div class="input-group">
+            <label for="input_language_hint">Language Hint</label>
+            <input id="input_language_hint" name="input_language_hint" type="text" placeholder="e.g. en (optional)" />
+          </div>
+          
+          <label class="toggle-row">
+            <input id="include_raw_transcript" name="include_raw_transcript" type="checkbox" checked />
+            <span>Include raw transcript</span>
+          </label>
+          <label class="toggle-row" style="margin-bottom: 24px;">
+            <input id="include_timestamps" name="include_timestamps" type="checkbox" checked />
+            <span>Include timestamps</span>
+          </label>
+          
+          <button type="submit" class="btn-primary">Submit Job</button>
+        </form>
+      </div>
+
+      <div class="section">
+        <h3>Status / Result</h3>
+        <div class="input-group" style="margin-bottom: 8px;">
+          <input id="job_id" type="text" placeholder="Job ID..." />
         </div>
-      </div>
-      <div class="row">
-        <div>
-          <label for="input_language_hint">Input Language Hint</label>
-          <input id="input_language_hint" name="input_language_hint" type="text" placeholder="en (optional)" />
-        </div>
-      </div>
-      <div class="row">
-        <label><input id="include_raw_transcript" name="include_raw_transcript" type="checkbox" checked /> include_raw_transcript</label>
-        <label><input id="include_timestamps" name="include_timestamps" type="checkbox" checked /> include_timestamps</label>
-      </div>
-      <div class="row">
-        <button type="submit">Submit Job</button>
-      </div>
-    </form>
-  </div>
-
-  <div class="card">
-    <h3>Status / Result</h3>
-    <div class="row">
-      <div>
-        <label for="job_id">Job ID</label>
-        <input id="job_id" type="text" placeholder="Paste job id..." />
-      </div>
-      <div style="display:flex; align-items:flex-end; gap:8px;">
-        <button id="statusBtn" class="btn-ghost" type="button">Get Status</button>
-        <button id="resultBtn" class="btn-ghost" type="button">Get Result</button>
-      </div>
-    </div>
-  </div>
-
-  <div class="card portrait-stage-card">
-    <h3>Response</h3>
-    <div id="previewPanel">
-      <div class="preview-wrap">
-        <video id="previewVideo" class="preview-video" preload="metadata"></video>
-        <div id="previewPlaceholder" class="preview-placeholder">No video loaded</div>
-      </div>
-      <div class="preview-controls">
-        <button id="playPauseBtn" type="button">Play</button>
-        <button id="autoCutBtn" class="btn-ghost" type="button" disabled>Open Caption Editor</button>
-        <span id="timeDisplay" class="preview-time">0:00 / 0:00</span>
-      </div>
-      <div id="tlContainer" class="tl-container">
-        <div class="tl-track"><div id="tlFill" class="tl-fill"></div></div>
-        <div id="tlPlayhead" class="tl-playhead"></div>
-        <div id="tlHoverLine" class="tl-hover-line"></div>
-        <div id="tlPreview" class="tl-preview-overlay">
-          <canvas id="tlCanvas" class="tl-preview-canvas"></canvas>
-          <span id="tlPreviewTime" class="tl-preview-time">0:00</span>
+        <div class="action-row">
+          <button id="statusBtn" class="btn-ghost" type="button">Get Status</button>
+          <button id="resultBtn" class="btn-ghost" type="button">Get Result</button>
         </div>
       </div>
     </div>
-    <pre id="out">{}</pre>
-  </div>
 
-  <div id="captionEditorCard" class="card portrait-stage-card">
-    <h3>Caption Editor</h3>
-    <div class="editor-stage">
-      <div class="preview-wrap editor-preview-wrap">
-        <video id="editorVideo" class="preview-video" preload="metadata"></video>
-        <div id="editorCaptionOverlay" class="editor-caption-overlay hidden"></div>
-      </div>
-      <div class="editor-controls">
-        <button id="editorPlayBtn" type="button" class="btn-ghost">Play</button>
-        <button id="renderEditorBtn" type="button">Render Final Video</button>
-        <button id="exportSrtBtn" type="button" class="btn-ghost">Export SRT</button>
-        <span id="editorTimeDisplay" class="preview-time">0:00 / 0:00</span>
-      </div>
-      <div id="editorRuler" class="editor-ruler"></div>
-      <div id="editorTimeline" class="editor-timeline">
-        <div id="editorTrack" class="editor-track">
-          <div id="editorTrackFill" class="editor-track-fill"></div>
-          <div id="editorTrackPlayhead" class="editor-track-playhead"></div>
-          <div id="editorTrackHover" class="editor-track-hover"></div>
+    <!-- RIGHT COLUMN: Stage (Video & Editor) -->
+    <div class="right-col">
+      <!-- Standard Preview Mode -->
+      <div id="previewPanel">
+        <div class="stage-header">
+          <button id="autoCutBtn" class="btn-ghost" type="button" disabled>Open Editor</button>
         </div>
-        <div id="editorMiniPreview" class="tl-preview-overlay editor-mini-preview">
-          <canvas id="editorMiniCanvas" class="tl-preview-canvas"></canvas>
-          <span id="editorMiniTime" class="tl-preview-time">0:00</span>
+        <div class="preview-wrap">
+          <video id="previewVideo" class="preview-video" preload="metadata"></video>
+          <div id="previewPlaceholder" class="preview-placeholder">No media loaded</div>
         </div>
-      </div>
-      <div class="cue-inspector">
-        <label for="cueText">Caption Text</label>
-        <textarea id="cueText" placeholder="Select a caption block to edit"></textarea>
-        <div class="cue-inspector-grid">
-          <div>
-            <label for="cueStartInput">Start (s)</label>
-            <input id="cueStartInput" type="number" min="0" step="0.1" />
-          </div>
-          <div>
-            <label for="cueEndInput">End (s)</label>
-            <input id="cueEndInput" type="number" min="0" step="0.1" />
-          </div>
-          <div>
-            <label for="cueDurationInput">Duration (s)</label>
-            <input id="cueDurationInput" type="number" min="0.3" step="0.1" />
+        <div class="preview-controls">
+          <button id="playPauseBtn" class="btn-ghost" type="button">Play</button>
+          <span id="timeDisplay" class="preview-time">0:00 / 0:00</span>
+        </div>
+        <div id="tlContainer" class="tl-container">
+          <div class="tl-track"><div id="tlFill" class="tl-fill"></div></div>
+          <div id="tlPlayhead" class="tl-playhead"></div>
+          <div id="tlHoverLine" class="tl-hover-line"></div>
+          <div id="tlPreview" class="tl-preview-overlay">
+            <canvas id="tlCanvas" class="tl-preview-canvas"></canvas>
+            <span id="tlPreviewTime" class="tl-preview-time">0:00</span>
           </div>
         </div>
-        <div style="margin-top:12px;">
-          <label for="captionHeightInput">Caption Height</label>
-          <input id="captionHeightInput" type="range" min="10" max="90" step="1" />
-        </div>
-        <div class="cue-nav">
-          <div class="cue-nav-actions">
-            <button id="prevCueBtn" type="button" class="btn-ghost">Previous</button>
-            <button id="nextCueBtn" type="button" class="btn-ghost">Next</button>
-          </div>
-          <span id="cueMeta" class="cue-meta">No cue selected</span>
-        </div>
-        <div id="editorStatus" class="editor-status"></div>
-        <a id="editorDownloadLink" class="download-link hidden" href="#" download="autocut.mp4">Download Current Video</a>
       </div>
+
+      <!-- Editor Mode -->
+      <div id="captionEditorCard">
+        <div class="stage-header">
+          <button id="exportSrtBtn" class="btn-ghost" type="button">Export SRT</button>
+          <button id="renderEditorBtn" class="btn-primary" type="button" style="width:auto;">Render Video</button>
+        </div>
+        <div class="preview-wrap">
+          <video id="editorVideo" class="preview-video" preload="metadata"></video>
+          <div id="editorCaptionOverlay" class="editor-caption-overlay hidden"></div>
+        </div>
+        <div class="preview-controls">
+          <button id="editorPlayBtn" class="btn-ghost" type="button">Play</button>
+          <span id="editorTimeDisplay" class="preview-time">0:00 / 0:00</span>
+        </div>
+        
+        <div id="editorRuler" class="editor-ruler"></div>
+        <div id="editorTimeline" class="editor-timeline">
+          <div id="editorTrack" class="editor-track">
+            <div id="editorTrackFill" class="editor-track-fill"></div>
+            <div id="editorTrackPlayhead" class="editor-track-playhead"></div>
+            <div id="editorTrackHover" class="editor-track-hover"></div>
+          </div>
+          <div id="editorMiniPreview" class="tl-preview-overlay" style="bottom: 72px;">
+            <canvas id="editorMiniCanvas" class="tl-preview-canvas"></canvas>
+            <span id="editorMiniTime" class="tl-preview-time">0:00</span>
+          </div>
+        </div>
+        
+        <div class="cue-inspector">
+          <label for="cueText">Caption Text</label>
+          <textarea id="cueText" placeholder="Select a caption block to edit"></textarea>
+          
+          <div class="cue-inspector-grid">
+            <div>
+              <label for="cueStartInput">Start (s)</label>
+              <input id="cueStartInput" type="number" min="0" step="0.1" />
+            </div>
+            <div>
+              <label for="cueEndInput">End (s)</label>
+              <input id="cueEndInput" type="number" min="0" step="0.1" />
+            </div>
+            <div>
+              <label for="cueDurationInput">Duration (s)</label>
+              <input id="cueDurationInput" type="number" min="0.3" step="0.1" />
+            </div>
+          </div>
+          
+          <div style="margin-top:20px;">
+            <label for="captionHeightInput">Caption Height</label>
+            <input id="captionHeightInput" type="range" min="10" max="90" step="1" />
+          </div>
+          
+          <div class="cue-nav">
+            <span id="cueMeta" class="cue-meta">No cue selected</span>
+            <div class="cue-nav-actions">
+              <button id="prevCueBtn" class="btn-ghost" type="button">Previous</button>
+              <button id="nextCueBtn" class="btn-ghost" type="button">Next</button>
+            </div>
+          </div>
+          
+          <div id="editorStatus" style="font-size: 13px; margin-top: 16px; color: var(--muted);"></div>
+          <a id="editorDownloadLink" class="download-link hidden" href="#" download="autocut.mp4">Download Reel</a>
+        </div>
+      </div>
+
+      <pre id="out"></pre>
     </div>
   </div>
 
